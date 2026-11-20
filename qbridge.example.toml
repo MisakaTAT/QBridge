@@ -47,6 +47,8 @@ path = "/qq/webhook"
 
 # ---- 本地 ID ----
 # hash: 由 OpenID 确定性生成，删库重建后保持不变；sequence: 按首次出现顺序自增
+# 修改 mode / salt / bits 后，请删除 [storage].path 指向的数据库并重建。
+# 同一个数据库混用 hash 和 sequence 会导致 ID 不一致或碰撞。
 [identity]
 mode = "hash"
 salt = "qbridge"
