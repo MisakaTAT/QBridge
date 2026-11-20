@@ -321,4 +321,6 @@ cargo test --workspace --locked
 
 ## License
 
-MIT
+AGPL-3.0-only。
+
+如果修改本程序并通过网络向用户提供服务，需要按照 AGPL 的要求向用户提供对应源代码。
