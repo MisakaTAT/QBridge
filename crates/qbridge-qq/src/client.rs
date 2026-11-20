@@ -732,6 +732,30 @@ impl Client {
         .map(|_| ())
     }
 
+    /// 撤回群消息，可选择隐藏撤回提示。
+    pub async fn recall_group(
+        &self,
+        group: &GroupOpenId,
+        message_id: &str,
+        hide_tip: bool,
+    ) -> Result<(), Error> {
+        let message_id = path_segment(message_id, "message_id")?;
+        let query = if hide_tip {
+            vec![("hidetip", "true")]
+        } else {
+            Vec::new()
+        };
+        self.request::<serde::de::IgnoredAny>(
+            Method::DELETE,
+            GROUP_RECALL,
+            &[group.as_str(), message_id],
+            &query,
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// 批量移除群成员，单次最多 20 个。
     pub async fn remove_group_members(
         &self,

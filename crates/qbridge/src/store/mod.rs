@@ -1244,6 +1244,20 @@ impl Store {
         .await
     }
 
+    /// 撤回成功后删除消息缓存，入站和机器人消息都适用。
+    pub async fn remove_recalled(&self, id: i32) -> Result<(), Error> {
+        self.call(move |connection| {
+            let removed = connection
+                .execute("DELETE FROM message WHERE id=?1", params![id])
+                .map_err(database)?;
+            if removed == 0 {
+                return Err(Error::MessageNotCached);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// 在入站消息缓存中查找图片 URL。
     pub async fn image_url(&self, file: &str, now: i64) -> Result<Option<String>, Error> {
         let file = file.to_owned();

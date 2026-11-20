@@ -28,12 +28,22 @@ pub async fn get_msg(bridge: &Bridge, request: MessageRef, now: i64) -> Result<V
 
 pub async fn delete_msg(bridge: &Bridge, request: MessageRef) -> Result<Value, ActionError> {
     let target = bridge.store.recall_target(request.message_id).await?;
-    if target.inbound {
+    if target.inbound && !matches!(target.conversation, crate::store::Conversation::Group(_)) {
         return Err(ActionError::NotOwned);
     }
     let peer = peer(target.conversation, &target.openid)?;
-    bridge.qq.recall(&peer, &target.official_id).await?;
-    if let Err(error) = bridge.store.remove_outbound(request.message_id).await {
+    match &peer {
+        qbridge_qq::Peer::Group(group) => {
+            bridge
+                .qq
+                .recall_group(group, &target.official_id, true)
+                .await?;
+        }
+        qbridge_qq::Peer::User(_) => {
+            bridge.qq.recall(&peer, &target.official_id).await?;
+        }
+    }
+    if let Err(error) = bridge.store.remove_recalled(request.message_id).await {
         tracing::warn!(
             message_id = request.message_id,
             reason = %error,

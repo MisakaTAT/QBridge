@@ -303,6 +303,11 @@ async fn recall_target_exposes_conversation_and_only_removes_bot_messages() {
         store.remove_outbound(inbound).await,
         Err(Error::NotOwned)
     ));
+    store.remove_recalled(inbound).await.unwrap();
+    assert!(matches!(
+        store.recall_target(inbound).await,
+        Err(Error::MessageNotCached)
+    ));
 }
 
 #[tokio::test]

@@ -21,7 +21,7 @@
 | `send_private_forward_msg` | 支持扩展 | `messages` 为 node 数组，渲染为一条 Markdown |
 | `send_group_forward_msg` | 支持扩展 | 同上 |
 | `send_forward_msg` | 支持扩展 | 同上，按 `message_type` 或目标字段决定场景 |
-| `delete_msg` | 支持 | 只能撤回机器人自己发送且仍在缓存中的消息 |
+| `delete_msg` | 支持 | 可撤回机器人消息；群聊中可撤回已缓存的群成员消息，需要机器人有对应权限 |
 | `get_msg` | 支持 | 返回本地缓存的消息事件；过期或不存在返回 `MESSAGE_NOT_CACHED` |
 | `get_image` | 支持 | 只查询入站消息缓存中的图片 URL；不下载文件 |
 | `get_group_info` | 支持 | 调用 QQ 群信息接口 |

@@ -157,6 +157,37 @@ async fn deletes_only_bot_messages_and_clears_the_cache() {
 }
 
 #[tokio::test]
+async fn deletes_cached_group_member_messages() {
+    let service = service().await;
+    let store = memory_store();
+    let bridge = service.bridge(store.clone());
+    let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
+    let conversation = Conversation::Group(group);
+    let inbound = store
+        .save_inbound(
+            conversation,
+            "IN",
+            now() - 5,
+            now() + 1000,
+            &message_event("group", group, "hi", now() - 5),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    service.fake.respond(200, json!({}));
+    run(&bridge, "delete_msg", json!({"message_id": inbound}))
+        .await
+        .unwrap();
+    let requests = service.fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "DELETE");
+    assert_eq!(requests[0].path, "/v2/groups/GROUP/messages/IN");
+    assert_eq!(requests[0].query, "hidetip=true");
+    assert!(store.message(inbound, now()).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn queries_group_information_members_and_bans() {
     let service = service().await;
     let store = memory_store();

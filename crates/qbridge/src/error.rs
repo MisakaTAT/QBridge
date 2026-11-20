@@ -139,7 +139,7 @@ impl ActionError {
             Self::SendOutcomeUnknown => {
                 "QQ accepted the message but local caching failed; do not retry".into()
             }
-            Self::NotOwned => "only messages sent by this bot can be recalled".into(),
+            Self::NotOwned => "only bot messages and group member messages can be recalled".into(),
             Self::Platform(error) => error.to_string(),
         }
     }
