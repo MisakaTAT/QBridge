@@ -1,0 +1,55 @@
+# QBridge 配置示例。复制为 qbridge.toml 后按需修改。
+# 所有密钥字段都可以写字符串，或写 { env = "NAME" } 从环境变量读取。
+#
+# OB11 通用设置和四种传输分别配置：
+#   HTTP、HTTP POST、正向 WebSocket、反向 WebSocket
+
+# ---- OB11 通用设置，必须放在任何表之前 ----
+self_id = 10000
+access_token = { env = "QBRIDGE_TOKEN" }   # 留空或删除表示不鉴权
+message_format = "array"                   # array | string
+heartbeat_ms = 15000                       # 0 表示关闭
+
+# ---- HTTP API ----
+# 只使用正向 WebSocket 时可删除整个 [http] 段。
+[http]
+bind = "127.0.0.1:5700"
+
+# ---- 正向 WebSocket ----
+# 需要正向 WS 就保留本段；整段注释掉即关闭。
+# bind 省略时与 [http] 共用监听地址；没有 [http] 时默认 127.0.0.1:5700。
+[forward_ws]
+# bind = "127.0.0.1:5700"
+
+# ---- 反向 WebSocket；可以配置多条 ----
+[[reverse_ws]]
+url = "ws://127.0.0.1:6700/onebot/v11/ws"
+role = "universal"                         # universal | api | event
+reconnect_ms = 3000
+
+# ---- HTTP POST 上报；可以配置多条 ----
+[[http_post]]
+url = "http://127.0.0.1:5701/"
+secret = { env = "QBRIDGE_POST_SECRET" }   # 可删除以关闭 X-Signature
+timeout_ms = 5000
+
+# ---- QQ 官方账号 ----
+[qq]
+app_id = "123456"
+secret = { env = "QBRIDGE_QQ_SECRET" }
+source = "gateway"                         # gateway | webhook
+intents = ["group_and_c2c", "group_member", "interaction"] # 仅 gateway 使用
+
+# source = "webhook" 时必须配置。
+[qq.webhook]
+bind = "127.0.0.1:8080"
+path = "/qq/webhook"
+
+[storage]
+path = "data/qbridge.sqlite"
+
+[limits]
+max_body_bytes = 1048576
+max_ws_bytes = 1048576
+queue_capacity = 256
+rate_limit_ms = 500

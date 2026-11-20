@@ -1,0 +1,42 @@
+[workspace]
+members = ["crates/qbridge-ob11", "crates/qbridge-qq", "crates/qbridge"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+
+[workspace.dependencies]
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "form", "query"] }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+ed25519-dalek = "3.0.0-rc.0"
+hmac = "0.12"
+futures-util = "0.3"
+md-5 = "0.10"
+imagesize = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+url = "2"
+
+[profile.release]
+lto = "thin"
+
+[profile.release.build-override]
+# Cargo 默认在 release 下剥离 debuginfo，rustc 1.94 在 macOS 27 上会把
+# 过程宏 dylib 的 __LINKEDIT 写坏，导致 rustc 无法加载它们。构建脚本和
+# 过程宏只在构建机运行，不应被剥离。
+strip = false

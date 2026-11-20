@@ -1,0 +1,9 @@
+/target/
+/data/
+/.local/
+/qbridge.toml
+/.env
+/.superpowers
+/docs
+.DS_Store
+*.log
