@@ -22,10 +22,28 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
+            upx: true
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
+            upx: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            upx: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            upx: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            upx: true
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            upx: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            upx: false
+          - target: aarch64-apple-darwin
+            os: macos-15
+            upx: false
 
     steps:
       - name: checkout
@@ -42,20 +60,21 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: build
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: strip linux binary
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.upx
         run: strip --strip-all target/${{ matrix.target }}/release/qbridge
 
       - name: upx linux binary
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.upx
         uses: crazy-max/ghaction-upx@v3
         with:
           version: latest
@@ -63,15 +82,15 @@ jobs:
           args: --best --lzma
 
       - name: upx windows binary
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.upx
         uses: crazy-max/ghaction-upx@v3
         with:
           version: latest
           files: target/${{ matrix.target }}/release/qbridge.exe
           args: --best --lzma
 
-      - name: package linux
-        if: runner.os == 'Linux'
+      - name: package unix
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
