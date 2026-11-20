@@ -129,7 +129,11 @@ async fn run_once(
     endpoints: &Endpoints,
     stop: Option<&CancellationToken>,
 ) -> Result<Outcome, AppError> {
-    let store = Store::open(&config.storage_path, &config.qq.app_id)?;
+    let store = Store::open_with_identity(
+        &config.storage_path,
+        &config.qq.app_id,
+        config.identity.clone(),
+    )?;
     let qq = Arc::new(match (&endpoints.api_base, &endpoints.token_url) {
         (Some(api_base), Some(token_url)) => {
             Client::with_endpoints(&config.qq.app_id, &config.qq.secret, api_base, token_url)?

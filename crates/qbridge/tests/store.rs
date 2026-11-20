@@ -554,3 +554,56 @@ async fn reads_profiles_in_batch_and_reports_identity_stats() {
     assert!(stats.lookups >= 2);
     assert!(stats.profile_hits >= 2);
 }
+
+fn hash_options(bits: u8) -> IdentityOptions {
+    IdentityOptions {
+        mode: IdentityIdMode::Hash,
+        salt: "test-salt".into(),
+        bits,
+    }
+}
+
+#[tokio::test]
+async fn hash_ids_are_stable_across_databases() {
+    let first =
+        Store::open_with_identity(std::path::Path::new(":memory:"), "app", hash_options(52))
+            .unwrap();
+    let second =
+        Store::open_with_identity(std::path::Path::new(":memory:"), "app", hash_options(52))
+            .unwrap();
+    let one = first
+        .identity(IdentityKind::User, "stable-openid")
+        .await
+        .unwrap();
+    let two = second
+        .identity(IdentityKind::User, "stable-openid")
+        .await
+        .unwrap();
+    assert_eq!(one, two);
+    assert!(one > 0);
+    assert!(one < (1_i64 << 52));
+    assert_ne!(
+        one,
+        first
+            .identity(IdentityKind::Member, "other-openid")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn hash_mode_reports_collisions_instead_of_reordering() {
+    let store = Store::open_with_identity(std::path::Path::new(":memory:"), "app", hash_options(1))
+        .unwrap();
+    let mut collision = false;
+    for openid in ["a", "b", "c", "d"] {
+        if matches!(
+            store.identity(IdentityKind::User, openid).await,
+            Err(qbridge::store::Error::IdentityCollision)
+        ) {
+            collision = true;
+            break;
+        }
+    }
+    assert!(collision);
+}

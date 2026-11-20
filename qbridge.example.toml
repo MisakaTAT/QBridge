@@ -45,6 +45,13 @@ intents = ["group_and_c2c", "group_member", "interaction"] # 仅 gateway 使用
 bind = "127.0.0.1:8080"
 path = "/qq/webhook"
 
+# ---- 本地 ID ----
+# hash: 由 OpenID 确定性生成，删库重建后保持不变；sequence: 按首次出现顺序自增
+[identity]
+mode = "hash"
+salt = "qbridge"
+bits = 52
+
 [storage]
 path = "data/qbridge.sqlite"
 

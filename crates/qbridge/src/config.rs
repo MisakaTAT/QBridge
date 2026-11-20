@@ -50,6 +50,8 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub identity: IdentityConfig,
+    #[serde(default)]
     pub limits: Limits,
 }
 
@@ -95,6 +97,43 @@ fn default_intents() -> Vec<IntentName> {
 pub struct WebhookConfig {
     pub bind: SocketAddr,
     pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityConfig {
+    #[serde(default)]
+    pub mode: IdentityMode,
+    #[serde(default = "default_identity_salt")]
+    pub salt: String,
+    #[serde(default = "default_identity_bits")]
+    pub bits: u8,
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        Self {
+            mode: IdentityMode::Hash,
+            salt: default_identity_salt(),
+            bits: default_identity_bits(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityMode {
+    Sequence,
+    #[default]
+    Hash,
+}
+
+fn default_identity_salt() -> String {
+    "qbridge".into()
+}
+
+fn default_identity_bits() -> u8 {
+    52
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +304,7 @@ impl Secret {
 pub struct ResolvedConfig {
     pub qq: ResolvedQq,
     pub storage_path: PathBuf,
+    pub identity: crate::store::IdentityOptions,
     pub self_id: i64,
     pub access_token: Option<String>,
     pub message_format: MessageFormat,
@@ -367,6 +407,14 @@ impl Config {
         if self.self_id <= 0 {
             return Err(Error::Invalid("self_id must be positive".into()));
         }
+        if self.identity.bits == 0 || self.identity.bits > 63 {
+            return Err(Error::Invalid(
+                "identity.bits must be between 1 and 63".into(),
+            ));
+        }
+        if self.identity.salt.is_empty() {
+            return Err(Error::Invalid("identity.salt is empty".into()));
+        }
         let access_token = self
             .access_token
             .as_ref()
@@ -442,6 +490,14 @@ impl Config {
                 webhook: self.qq.webhook.clone(),
             },
             storage_path: self.storage.path.clone(),
+            identity: crate::store::IdentityOptions {
+                mode: match self.identity.mode {
+                    IdentityMode::Sequence => crate::store::IdentityIdMode::Sequence,
+                    IdentityMode::Hash => crate::store::IdentityIdMode::Hash,
+                },
+                salt: self.identity.salt.clone(),
+                bits: self.identity.bits,
+            },
             self_id: self.self_id,
             access_token,
             message_format: match self.message_format {

@@ -172,6 +172,7 @@ impl From<store::Error> for ActionError {
             | store::Error::Database(_)
             | store::Error::AppMismatch
             | store::Error::SchemaVersion(_)
+            | store::Error::IdentityCollision
             | store::Error::InvalidContent => Self::Storage,
         }
     }

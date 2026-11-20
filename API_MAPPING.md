@@ -7,6 +7,7 @@
 - 对外 `user_id`、`group_id`、`message_id` 都是本地数字 ID；QQ OpenID 与官方消息 ID 只出现在 `qq` 扩展字段中。
 - `self_id` 来自顶层 `self_id` 配置。
 - 数字 ID 是 `entity.id`；外部 OpenID 存在 `identity` 表。`User` 和 `Member` 共用同一个 `user` 实体，同一 OpenID 跨私聊/群聊返回同一个数字 ID。
+- `[identity].mode` 可选 `hash`（默认，按 OpenID 确定性生成）或 `sequence`（按首次出现顺序自增）。`hash` 模式碰撞时返回失败，不重排已有 ID。
 - 同一实体可绑定多个身份，支持 bind / unbind / merge / export；数据库绑定 `app_id`，不能跨机器人复用。
 - 消息句柄是本地 int32；QQ 官方消息 ID 保留在缓存事件的 `qq.message_id` 中。
 

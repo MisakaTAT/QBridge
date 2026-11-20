@@ -65,6 +65,9 @@ fn parses_and_resolves_the_transport_sections() {
     assert_eq!(resolved.http_post.len(), 1);
     assert_eq!(resolved.http_post[0].secret.as_deref(), Some("post-secret"));
     assert_eq!(resolved.limits.queue_capacity, 256);
+    assert_eq!(resolved.identity.mode, qbridge::store::IdentityIdMode::Hash);
+    assert_eq!(resolved.identity.salt, "qbridge");
+    assert_eq!(resolved.identity.bits, 52);
 }
 
 #[test]
@@ -327,4 +330,46 @@ fn secret_debug_is_redacted() {
     assert_eq!(config.qq.intents[0], IntentName::GroupAndC2c);
     assert_eq!(config.qq.intents[1], IntentName::GroupMember);
     assert_eq!(config.qq.intents[2], IntentName::Interaction);
+}
+
+#[test]
+fn accepts_sequence_identity_mode() {
+    let config = Config::parse(
+        r#"
+self_id = 1
+
+[forward_ws]
+
+[qq]
+app_id = "1"
+secret = "s"
+
+[identity]
+mode = "sequence"
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.resolve().unwrap().identity.mode,
+        qbridge::store::IdentityIdMode::Sequence
+    );
+    assert!(matches!(
+        Config::parse(
+            r#"
+self_id = 1
+
+[forward_ws]
+
+[qq]
+app_id = "1"
+secret = "s"
+
+[identity]
+bits = 64
+"#,
+        )
+        .unwrap()
+        .resolve(),
+        Err(Error::Invalid(message)) if message.contains("identity.bits")
+    ));
 }

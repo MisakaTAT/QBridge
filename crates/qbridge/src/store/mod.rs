@@ -6,6 +6,7 @@ use rusqlite::{
     Connection, OptionalExtension, TransactionBehavior, params, params_from_iter,
     types::Value as SqlValue,
 };
+use sha1::{Digest, Sha1};
 
 mod gateway;
 mod schema;
@@ -44,6 +45,8 @@ pub enum Error {
     AppMismatch,
     #[error("database schema version {0} is not supported; delete the database")]
     SchemaVersion(i64),
+    #[error("deterministic identity id collision")]
+    IdentityCollision,
     #[error("unknown target")]
     UnknownTarget,
     #[error("message is not cached")]
@@ -67,6 +70,42 @@ fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn create_entity(
+    transaction: &rusqlite::Transaction<'_>,
+    app_id: &str,
+    kind: &str,
+    now: i64,
+    explicit_id: Option<i64>,
+) -> Result<i64, Error> {
+    if let Some(id) = explicit_id {
+        let exists: bool = transaction
+            .query_row("SELECT 1 FROM entity WHERE id=?1", params![id], |_| {
+                Ok(true)
+            })
+            .optional()
+            .map_err(database)?
+            .unwrap_or(false);
+        if exists {
+            return Err(Error::IdentityCollision);
+        }
+        transaction
+            .execute(
+                "INSERT INTO entity(id, app_id, kind, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?4)",
+                params![id, app_id, kind, now],
+            )
+            .map_err(database)?;
+        Ok(id)
+    } else {
+        transaction
+            .execute(
+                "INSERT INTO entity(app_id, kind, created_at, updated_at) VALUES(?1, ?2, ?3, ?3)",
+                params![app_id, kind, now],
+            )
+            .map_err(database)?;
+        Ok(transaction.last_insert_rowid())
+    }
 }
 
 pub(super) fn database(error: impl std::fmt::Display) -> Error {
@@ -93,6 +132,51 @@ impl IdentityKind {
             Conversation::Private(_) => Self::User,
             Conversation::Group(_) => Self::Group,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IdentityIdMode {
+    #[default]
+    Sequence,
+    Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityOptions {
+    pub mode: IdentityIdMode,
+    pub salt: String,
+    pub bits: u8,
+}
+
+impl Default for IdentityOptions {
+    fn default() -> Self {
+        Self {
+            mode: IdentityIdMode::Sequence,
+            salt: "qbridge".into(),
+            bits: 52,
+        }
+    }
+}
+
+impl IdentityOptions {
+    fn deterministic_id(&self, app_id: &str, target_kind: &str, openid: &str) -> i64 {
+        let mut hash = Sha1::new();
+        for part in ["qbridge", self.salt.as_str(), app_id, target_kind, openid] {
+            hash.update(part.as_bytes());
+            hash.update([0]);
+        }
+        let digest = hash.finalize();
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&digest[..8]);
+        let value = u64::from_be_bytes(raw);
+        let mask = if self.bits >= 63 {
+            i64::MAX as u64
+        } else {
+            (1u64 << self.bits) - 1
+        };
+        let id = value & mask;
+        if id == 0 { 1 } else { id as i64 }
     }
 }
 
@@ -217,13 +301,27 @@ pub struct Store {
     connection: Arc<Mutex<Connection>>,
     app_id: Arc<str>,
     identity_cache: Arc<Mutex<HashMap<(String, String), i64>>>,
+    identity_options: IdentityOptions,
     metrics: Arc<IdentityMetrics>,
 }
 
 impl Store {
-    /// 打开数据库并检查结构版本与 app_id。
+    /// 打开数据库并检查结构版本与 app_id。默认使用自增 ID。
     pub fn open(path: &Path, app_id: &str) -> Result<Self, Error> {
-        if app_id.trim().is_empty() {
+        Self::open_with_identity(path, app_id, IdentityOptions::default())
+    }
+
+    /// 使用指定 ID 策略打开数据库。
+    pub fn open_with_identity(
+        path: &Path,
+        app_id: &str,
+        identity_options: IdentityOptions,
+    ) -> Result<Self, Error> {
+        if app_id.trim().is_empty()
+            || identity_options.salt.is_empty()
+            || identity_options.bits == 0
+            || identity_options.bits > 63
+        {
             return Err(Error::InvalidConfig);
         }
         if path != Path::new(":memory:")
@@ -270,6 +368,7 @@ impl Store {
             connection: Arc::new(Mutex::new(connection)),
             app_id: Arc::from(app_id),
             identity_cache: Arc::new(Mutex::new(HashMap::new())),
+            identity_options,
             metrics: Arc::new(IdentityMetrics::default()),
         })
     }
@@ -315,6 +414,7 @@ impl Store {
         let key_app = app_id.clone();
         let key_openid = openid.clone();
         let key_kind = target_kind.clone();
+        let identity_options = self.identity_options.clone();
         let scene = scene.to_owned();
         let id = self
             .call(move |connection| {
@@ -350,13 +450,10 @@ impl Store {
                     transaction.commit().map_err(database)?;
                     return Ok(id);
                 }
-                transaction
-                    .execute(
-                        "INSERT INTO entity(app_id, kind, created_at, updated_at) VALUES(?1, ?2, ?3, ?3)",
-                        params![key_app.as_ref(), key_kind, now],
-                    )
-                    .map_err(database)?;
-                let id = transaction.last_insert_rowid();
+                let explicit_id = (identity_options.mode == IdentityIdMode::Hash).then(|| {
+                    identity_options.deterministic_id(key_app.as_ref(), &key_kind, &key_openid)
+                });
+                let id = create_entity(&transaction, key_app.as_ref(), &key_kind, now, explicit_id)?;
                 transaction
                     .execute(
                         "INSERT INTO identity(app_id, entity_id, target_kind, platform, kind, external_id, first_seen, last_seen) \
@@ -455,6 +552,7 @@ impl Store {
         let values = openids.to_vec();
         let cache_app = app_id.clone();
         let cache_kind = target_kind.clone();
+        let identity_options = self.identity_options.clone();
         let result = self
             .call(move |connection| {
                 let now = unix_now();
@@ -482,13 +580,16 @@ impl Store {
                             .map_err(database)?;
                         found
                     } else {
-                        transaction
-                            .execute(
-                                "INSERT INTO entity(app_id, kind, created_at, updated_at) VALUES(?1, ?2, ?3, ?3)",
-                                params![app_id, target_kind, now],
-                            )
-                            .map_err(database)?;
-                        let entity_id = transaction.last_insert_rowid();
+                        let explicit_id = (identity_options.mode == IdentityIdMode::Hash).then(|| {
+                            identity_options.deterministic_id(&app_id, &target_kind, &openid)
+                        });
+                        let entity_id = create_entity(
+                            &transaction,
+                            &app_id,
+                            &target_kind,
+                            now,
+                            explicit_id,
+                        )?;
                         transaction
                             .execute(
                                 "INSERT INTO identity(app_id, entity_id, target_kind, platform, kind, external_id, first_seen, last_seen) \
