@@ -318,9 +318,3 @@ cargo test --workspace --locked
 - `qbridge-ob11`：OneBot v11 类型、CQ 编解码和事件序列化
 - `qbridge-qq`：QQ 官方 API v2、Gateway 和 Webhook 客户端
 - `qbridge`：存储、协议转换、服务端和程序入口
-
-## License
-
-AGPL-3.0-only。
-
-如果修改本程序并通过网络向用户提供服务，需要按照 AGPL 的要求向用户提供对应源代码。
