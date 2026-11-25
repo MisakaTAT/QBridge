@@ -242,7 +242,7 @@ secret = "s"
     .unwrap();
     assert!(matches!(
         no_listener.resolve(),
-        Err(Error::Invalid(message)) if message.contains("http or forward_ws")
+        Err(Error::Invalid(message)) if message.contains("OB11 transport")
     ));
 
     let bad_queue = Config::parse(
@@ -262,6 +262,23 @@ queue_capacity = 0
         bad_queue.resolve(),
         Err(Error::Invalid(message)) if message.contains("limits")
     ));
+}
+
+#[test]
+fn accepts_outbound_transports_without_an_ob11_listener() {
+    let account = "self_id = 1\n[qq]\napp_id = \"1\"\nsecret = \"s\"\n";
+    for transport in [
+        "[[reverse_ws]]\nurl = \"ws://127.0.0.1:6700/ws\"\n",
+        "[[http_post]]\nurl = \"http://127.0.0.1:5701/\"\n",
+    ] {
+        let config = Config::parse(&format!("{account}{transport}"))
+            .unwrap()
+            .resolve()
+            .unwrap();
+        assert!(config.http_bind.is_none());
+        assert!(config.forward_ws_bind.is_none());
+        assert_eq!(config.reverse_ws.len() + config.http_post.len(), 1);
+    }
 }
 
 #[test]

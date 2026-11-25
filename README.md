@@ -89,7 +89,6 @@ flowchart LR
 - [x] 群成员列表
 - [x] 群列表
 - [x] 好友列表
-- [x] 在线客户端
 - [x] 单人禁言
 - [x] 踢人
 - [x] 踢人并拉黑
@@ -161,7 +160,6 @@ flowchart LR
 - [x] `get_group_member_info`
 - [x] `get_group_member_list`
 - [x] `get_friend_list`
-- [x] `get_online_clients`
 - [x] `set_group_ban`
 - [x] `set_group_kick`
 - [x] `set_group_add_request`
@@ -173,6 +171,7 @@ flowchart LR
 
 未实现：
 
+- [ ] `get_online_clients`
 - [ ] `get_forward_msg`
 - [ ] `send_like`
 - [ ] `set_group_whole_ban`
@@ -270,6 +269,8 @@ Authorization: Bearer <token>
 
 HTTP API 的动作参数支持 JSON、query 和表单；HTTP POST 上报事件使用 JSON。
 
+至少配置一种下游传输。仅启用反向 WebSocket 或 HTTP POST 时，可同时省略 `[http]` 与 `[forward_ws]`。HTTP POST 单独启用时，动作通过响应体的快速操作触发。
+
 ## 行为说明
 
 - **被动回复**：群聊每条入站消息最多 5 次，单聊最多 4 次；QBridge 自动维护 `msg_seq`。
@@ -290,7 +291,6 @@ HTTP API 的动作参数支持 JSON、query 和表单；HTTP POST 上报事件�
 - 群聊 @全体要求机器人是群管理员，且每个群每天只能发送一次。
 - QQ 的 `GROUP_MEMBER_ADD` / `GROUP_MEMBER_REMOVE` 事件不包含操作者，无法仅凭事件区分群主操作和成员主动退出。
 - `get_msg` / `get_image` 只查询本地缓存，不访问 QQ 历史消息。
-- `get_online_clients` 返回空列表。
 - HTTP POST 使用内存队列和有限重试，队列满、重试耗尽或进程退出时可能丢失事件。可通过 `get_status` 查看队列积压和丢弃计数。
 - Gateway 的持久化 Resume 检查点在桥接处理与本地分发尝试之后推进。若进程在消息写入缓存后、分发前退出，缓存去重仍可能拦截重放。
 - 自动测试只使用本地模拟 QQ 服务，发布前仍需真实 QQ 验收。

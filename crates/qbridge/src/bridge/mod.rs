@@ -123,9 +123,7 @@ impl Bridge {
             Action::GetFriendList => {
                 extension::execute(self, "get_friend_list", Map::new(), now).await
             }
-            Action::GetOnlineClients => {
-                extension::execute(self, "get_online_clients", Map::new(), now).await
-            }
+            Action::GetOnlineClients => Err(ActionError::Unsupported(UnsupportedKind::Action)),
             Action::GetStatus => query::status(self),
             Action::GetVersionInfo => query::version(),
             Action::CanSendImage | Action::CanSendRecord => Ok(json!({"yes": true})),

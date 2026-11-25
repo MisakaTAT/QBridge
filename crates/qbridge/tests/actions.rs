@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use qbridge::{
     bridge::Bridge,
-    error::{ActionError, NotFoundKind},
+    error::{ActionError, NotFoundKind, UnsupportedKind},
     store::{Conversation, IdentityKind},
 };
 use qbridge_ob11::Call;
@@ -484,8 +484,8 @@ async fn exposes_group_requests_blacklist_lists_and_profile_links() {
     assert_eq!(friends[0]["nickname"], "User Name");
     assert_eq!(friends[0]["remark"], "Remark");
     assert_eq!(
-        run(&bridge, "get_online_clients", json!({})).await.unwrap()["clients"],
-        json!([])
+        run(&bridge, "get_online_clients", json!({})).await,
+        Err(ActionError::Unsupported(UnsupportedKind::Action))
     );
     let avatar = run(&bridge, "get_avatar", json!({"user_id": user}))
         .await
@@ -522,6 +522,54 @@ async fn exposes_group_requests_blacklist_lists_and_profile_links() {
     assert_eq!(requests[4].body["add_to_member_blacklist"], true);
     assert_eq!(requests[5].path, "/v2/groups/GROUP/info");
     assert_eq!(requests[6].body["callback_data"], "cb");
+}
+
+#[tokio::test]
+async fn group_list_omits_missing_groups_and_propagates_permission_errors() {
+    let service = service().await;
+    let store = memory_store();
+    let first = store.identity(IdentityKind::Group, "FIRST").await.unwrap();
+    store
+        .identity(IdentityKind::Group, "MISSING")
+        .await
+        .unwrap();
+    let last = store.identity(IdentityKind::Group, "LAST").await.unwrap();
+    let bridge = service.bridge(store);
+    service
+        .fake
+        .respond_to("/v2/groups/FIRST/info", 200, json!({"group_name": "First"}));
+    service
+        .fake
+        .respond_to("/v2/groups/MISSING/info", 404, json!({"code": 404}));
+    service
+        .fake
+        .respond_to("/v2/groups/LAST/info", 200, json!({"group_name": "Last"}));
+    let list = run(&bridge, "get_group_list", json!({})).await.unwrap();
+    assert_eq!(list[0]["group_id"], first);
+    assert_eq!(list[0]["group_name"], "First");
+    assert_eq!(list[1]["group_id"], last);
+    assert_eq!(list[1]["group_name"], "Last");
+    assert_eq!(list.as_array().unwrap().len(), 2);
+
+    service
+        .fake
+        .respond_to("/v2/groups/LAST/info", 403, json!({}));
+    assert!(matches!(
+        run(&bridge, "get_group_list", json!({})).await,
+        Err(ActionError::Platform(qbridge_qq::Error::Auth(_)))
+    ));
+
+    service
+        .fake
+        .respond_to("/v2/groups/LAST/info", 404, json!({"code": 11253}));
+    assert!(matches!(
+        run(&bridge, "get_group_list", json!({})).await,
+        Err(ActionError::Platform(qbridge_qq::Error::Api {
+            http_status: 404,
+            code: Some(11253),
+            ..
+        }))
+    ));
 }
 
 #[tokio::test]

@@ -6,9 +6,10 @@ use crate::{
         group::{group_openid, join_flag, member_openid},
         send,
     },
-    error::ActionError,
+    error::{ActionError, NotFoundKind},
     store::IdentityKind,
 };
+use futures_util::{StreamExt, TryStreamExt, stream};
 use qbridge_ob11::{Message, Target, action::SendMsg};
 use serde_json::{Map, Value};
 
@@ -29,7 +30,6 @@ pub async fn execute(
         "set_group_member_blacklist" => set_member_blacklist(bridge, params).await,
         "get_group_list" => group_list(bridge).await,
         "get_friend_list" => friend_list(bridge).await,
-        "get_online_clients" => Ok(serde_json::json!({"clients": [], "tiny_id": 0})),
         "get_avatar" => avatar(bridge, params).await,
         "get_robot_share_link" => share_link(bridge, params).await,
         "join_approval_strategy_create" => strategy_create(bridge, params).await,
@@ -319,19 +319,32 @@ async fn set_member_blacklist(
 }
 
 async fn group_list(bridge: &Bridge) -> Result<Value, ActionError> {
+    const CONCURRENT_QUERIES: usize = 4;
     let identities = bridge.store.identities(IdentityKind::Group).await?;
-    let mut groups = Vec::with_capacity(identities.len());
-    for (id, openid) in identities {
-        let group = qbridge_qq::GroupOpenId::new(openid)
-            .map_err(|_| ActionError::NotFound(crate::error::NotFoundKind::UnknownTarget))?;
-        let info = bridge.qq.group_info(&group).await?;
-        groups.push(serde_json::json!({
-            "group_id": id,
-            "group_name": info.group_name,
-            "member_count": info.group_member_num.unwrap_or(0),
-            "max_member_count": 0,
-        }));
-    }
+    let groups = stream::iter(identities)
+        .map(|(id, openid)| async move {
+            let group = qbridge_qq::GroupOpenId::new(openid)
+                .map_err(|_| ActionError::NotFound(NotFoundKind::UnknownTarget))?;
+            let info = match bridge.qq.group_info(&group).await {
+                Ok(info) => info,
+                Err(qbridge_qq::Error::Api {
+                    http_status: 404,
+                    code,
+                    ..
+                }) if code != Some(11253) => return Ok(None),
+                Err(error) => return Err(ActionError::from(error)),
+            };
+            Ok(Some(serde_json::json!({
+                "group_id": id,
+                "group_name": info.group_name,
+                "member_count": info.group_member_num.unwrap_or(0),
+                "max_member_count": 0,
+            })))
+        })
+        .buffered(CONCURRENT_QUERIES)
+        .try_filter_map(|group| async { Ok(group) })
+        .try_collect()
+        .await?;
     Ok(Value::Array(groups))
 }
 

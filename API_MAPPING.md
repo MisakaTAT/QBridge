@@ -35,9 +35,9 @@
 | `get_group_bot_state` | 支持扩展 | 查询机器人群内角色、推送设置和入群时间 |
 | `get_group_member_blacklist` | 支持扩展 | 群黑名单列表，分页 |
 | `set_group_member_blacklist` | 支持扩展 | 群黑名单增删，`op=add/del`，单次 1–20 人 |
-| `get_group_list` | 支持 | 从本地身份缓存逐群查询 QQ 群信息；只列出已见过的群 |
+| `get_group_list` | 支持 | 有界并发查询已见过的群，按本地 ID 排序；跳过 QQ 返回 HTTP 404 的群，权限错误及其他查询失败仍返回错误 |
 | `get_friend_list` | 支持 | 从本地身份缓存返回 C2C 用户，读取 profile 昵称/名片 |
-| `get_online_clients` | 支持 | 返回空客户端列表 |
+| `get_online_clients` | 不支持 | QQ 官方机器人 API 无法查询在线客户端，返回 `UNSUPPORTED_ACTION` |
 | `get_avatar` | 支持扩展 | 根据本地实体 ID 返回 QQ 头像直链；User/Member 已统一实体，不需要 `group_id` |
 | `get_robot_share_link` | 支持扩展 | 生成机器人资料页分享链接 |
 | `join_approval_strategy_create` | 支持扩展 | 创建入群自动审批策略 |
@@ -167,6 +167,8 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 | HTTP POST | 每个目标一个有界队列；失败最多重试 3 次（1s、2s、4s） |
 | 心跳 | `heartbeat_ms > 0` 时广播 `meta_event` heartbeat |
 
+至少配置一种下游传输。只启用反向 WebSocket 或 HTTP POST 时，QBridge 无需开启下游 HTTP API 或正向 WebSocket 监听。
+
 HTTP 状态码：
 
 | 状态 | 场景 |
@@ -217,6 +219,7 @@ HTTP POST 上报 JSON；请求头包含 `X-Self-ID`；配置了 `secret` 时还�
 
 以下 OneBot v11 标准动作会返回 `UNSUPPORTED_ACTION`（retcode 100）：
 
+- `get_online_clients`
 - `get_forward_msg`
 - `send_like`
 - `set_group_anonymous_ban`

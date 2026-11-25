@@ -12,7 +12,7 @@ use qbridge::{bridge::Bridge, store::Store};
 use qbridge_qq::Client;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
@@ -21,6 +21,7 @@ pub struct FakeQq(Arc<Mutex<Inner>>);
 
 struct Inner {
     responses: VecDeque<(u16, Option<Value>)>,
+    by_path: HashMap<String, (u16, Value)>,
     requests: Vec<Recorded>,
 }
 
@@ -34,6 +35,14 @@ pub struct Recorded {
 }
 
 impl FakeQq {
+    pub fn respond_to(&self, path: &str, status: u16, body: Value) {
+        self.0
+            .lock()
+            .unwrap()
+            .by_path
+            .insert(path.into(), (status, body));
+    }
+
     pub fn respond(&self, status: u16, body: Value) {
         self.0
             .lock()
@@ -72,6 +81,7 @@ async fn handle(State(fake): State<FakeQq>, request: Request<Body>) -> Response 
     };
     let response = {
         let mut state = fake.0.lock().unwrap();
+        let specific = state.by_path.get(&path).cloned();
         state.requests.push(Recorded {
             method,
             path,
@@ -79,10 +89,13 @@ async fn handle(State(fake): State<FakeQq>, request: Request<Body>) -> Response 
             body,
             headers,
         });
-        state.responses.pop_front().unwrap_or((
-            404,
-            Some(json!({"code": 404, "message": "missing fake response"})),
-        ))
+        specific
+            .map(|(status, body)| (status, Some(body)))
+            .or_else(|| state.responses.pop_front())
+            .unwrap_or((
+                404,
+                Some(json!({"code": 404, "message": "missing fake response"})),
+            ))
     };
     json_response(response.0, response.1)
 }
@@ -117,6 +130,7 @@ impl Drop for Service {
 pub async fn service() -> Service {
     let fake = FakeQq(Arc::new(Mutex::new(Inner {
         responses: VecDeque::new(),
+        by_path: HashMap::new(),
         requests: Vec::new(),
     })));
     let app = Router::new().fallback(any(handle)).with_state(fake.clone());

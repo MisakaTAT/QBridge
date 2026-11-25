@@ -130,6 +130,67 @@ fn timestamp() -> String {
 }
 
 #[tokio::test]
+async fn runs_with_only_http_post_as_the_ob11_transport() {
+    let (receiver, post_address, post_task) = start_post_receiver().await;
+    let webhook_address = free_address().await;
+    let config_path = std::env::temp_dir().join(format!(
+        "qbridge-post-only-{}-{}.toml",
+        std::process::id(),
+        webhook_address.port()
+    ));
+    let config = format!(
+        r#"
+self_id = 10000
+heartbeat_ms = 0
+[qq]
+app_id = "1234"
+secret = "{SECRET}"
+source = "webhook"
+[qq.webhook]
+bind = "{webhook_address}"
+path = "/qq/webhook"
+[storage]
+path = ":memory:"
+[[http_post]]
+url = "http://{post_address}/"
+"#
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let cancel = CancellationToken::new();
+    let mut app_task = tokio::spawn(app::run_until(
+        config_path.clone(),
+        Endpoints::default(),
+        cancel.clone(),
+    ));
+    let lifecycle = async {
+        loop {
+            if receiver
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event["sub_type"] == "enable")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        outcome = &mut app_task => panic!("the app stopped before publishing lifecycle: {outcome:?}"),
+        result = tokio::time::timeout(Duration::from_secs(3), lifecycle) => result.unwrap(),
+    }
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(3), app_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    post_task.abort();
+    std::fs::remove_file(config_path).unwrap();
+}
+
+#[tokio::test]
 async fn end_to_end_webhook_receive_reply_quote_recall_and_group_member_events() {
     let (post_receiver, post_address, post_task) = start_post_receiver().await;
     let qq = service().await;

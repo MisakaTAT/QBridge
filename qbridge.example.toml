@@ -3,6 +3,7 @@
 #
 # OB11 通用设置和四种传输分别配置：
 #   HTTP、HTTP POST、正向 WebSocket、反向 WebSocket
+# 至少启用一种传输。只用反向 WebSocket 或 HTTP POST 时可省略两个监听段。
 
 # ---- OB11 通用设置，必须放在任何表之前 ----
 self_id = 10000
@@ -11,7 +12,7 @@ message_format = "array"                   # array | string
 heartbeat_ms = 15000                       # 0 表示关闭
 
 # ---- HTTP API ----
-# 只使用正向 WebSocket 时可删除整个 [http] 段。
+# 使用其他下游传输时可删除整个 [http] 段。
 [http]
 bind = "127.0.0.1:5700"
 

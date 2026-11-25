@@ -428,9 +428,13 @@ impl Config {
                 "limits must have positive sizes and queue capacity".into(),
             ));
         }
-        if self.http.is_none() && self.forward_ws.is_none() {
+        if self.http.is_none()
+            && self.forward_ws.is_none()
+            && self.reverse_ws.is_empty()
+            && self.http_post.is_empty()
+        {
             return Err(Error::Invalid(
-                "at least one of http or forward_ws must be configured".into(),
+                "at least one OB11 transport (http, forward_ws, reverse_ws, or http_post) must be configured".into(),
             ));
         }
         let mut reverse_ws = Vec::new();

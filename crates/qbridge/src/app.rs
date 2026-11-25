@@ -187,9 +187,7 @@ async fn run_once(
         (None, Some(forward)) => {
             listener_configs.push((forward, server::http::Routes::FORWARD_WS));
         }
-        (None, None) => {
-            return Err(std::io::Error::other("no OB11 listener configured").into());
-        }
+        (None, None) => {}
     }
     let mut listeners = Vec::new();
     for (bind, routes) in listener_configs {
@@ -271,7 +269,7 @@ async fn run_once(
         _ = wait_for_stop(stop) => Ok(Outcome::Stop),
         delay = restart_rx.recv() => Ok(Outcome::Restart(delay.unwrap_or(0))),
         _ = source_end_rx.recv() => Err("QQ event source terminated unexpectedly".to_string()),
-        failure = http_failure_rx.recv() => Err(failure
+        failure = http_failure_rx.recv(), if !http_tasks.is_empty() => Err(failure
             .unwrap_or_else(|| "OB11 HTTP server stopped unexpectedly".to_string())),
     };
 
