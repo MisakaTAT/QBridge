@@ -103,6 +103,33 @@ async fn wait_for(mut condition: impl FnMut() -> bool, timeout: Duration) -> boo
 }
 
 #[tokio::test]
+async fn status_reports_full_post_queues_and_rejected_events() {
+    let mut options = hub_options();
+    options.queue_capacity = 1;
+    options.http_posts = vec![PostTargetConfig {
+        url: url::Url::parse("http://127.0.0.1:1/post").unwrap(),
+        secret: None,
+        timeout: Duration::from_secs(1),
+    }];
+    let hub = Hub::new(Arc::new(StubHandler::new(10_000)), options);
+    hub.publish(message_context());
+    hub.publish(message_context());
+    let status = hub
+        .dispatch(qbridge_ob11::Call::parse("get_status", Default::default()).unwrap())
+        .await;
+    assert_eq!(status.data["event_delivery"]["http_post"]["queued"], 1);
+    assert_eq!(
+        status.data["event_delivery"]["http_post"]["queue_rejected"],
+        1
+    );
+    assert_eq!(
+        status.data["event_delivery"]["http_post"]["retry_exhausted"],
+        0
+    );
+    hub.shutdown();
+}
+
+#[tokio::test]
 async fn http_post_signs_retries_and_executes_quick_operations() {
     let (receiver, addr, task) = start_receiver().await;
     {

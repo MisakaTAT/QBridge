@@ -83,6 +83,8 @@ pub struct Hub {
     cancel: CancellationToken,
     shutting_down: AtomicBool,
     next_request: AtomicU64,
+    post_queue_rejected: AtomicU64,
+    post_retry_exhausted: AtomicU64,
     heartbeat_ms: u64,
     online: Arc<AtomicBool>,
     pub(crate) post_client: reqwest::Client,
@@ -129,6 +131,8 @@ impl Hub {
             cancel: CancellationToken::new(),
             shutting_down: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
+            post_queue_rejected: AtomicU64::new(0),
+            post_retry_exhausted: AtomicU64::new(0),
             heartbeat_ms: options.heartbeat_ms,
             online: options.online,
             post_client,
@@ -202,6 +206,7 @@ impl Hub {
                 value: value.clone(),
             };
             if let Err(error) = target.try_send(delivery) {
+                self.post_queue_rejected.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     target = index,
                     reason = if matches!(error, mpsc::error::TrySendError::Full(_)) {
@@ -213,6 +218,21 @@ impl Hub {
                 );
             }
         }
+    }
+
+    fn delivery_status(&self) -> Value {
+        let queued: usize = self
+            .post_targets
+            .iter()
+            .map(|queue| queue.max_capacity().saturating_sub(queue.capacity()))
+            .sum();
+        serde_json::json!({
+            "http_post": {
+                "queued": queued,
+                "queue_rejected": self.post_queue_rejected.load(Ordering::Relaxed),
+                "retry_exhausted": self.post_retry_exhausted.load(Ordering::Relaxed),
+            }
+        })
     }
 
     pub fn publish_lifecycle(&self, sub_type: LifecycleType) {
@@ -288,14 +308,18 @@ impl Hub {
     ) -> Response {
         let span_for_log = span.clone();
         let restart = matches!(action, Action::SetRestart(_));
+        let status = matches!(action, Action::GetStatus);
         async move {
-            let result = self
+            let mut result = self
                 .handler
                 .call(Call {
                     action,
                     mode: Mode::Sync,
                 })
                 .await;
+            if status && let Ok(Value::Object(data)) = &mut result {
+                data.insert("event_delivery".into(), self.delivery_status());
+            }
             let response = match &result {
                 Ok(_) if restart => Response::accepted(),
                 Ok(data) => Response::ok(data.clone()),

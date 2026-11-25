@@ -154,6 +154,8 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 - 官方 `GROUP_MEMBER_ADD`/`GROUP_MEMBER_REMOVE` 事件体只有 `timestamp`、`group_openid`、`member_openid`（退出事件另有 `user_openid`），**不包含操作者**。因此 `operator_id` 为 `null`，无法仅凭事件判断是群主/管理员操作还是成员主动退出；只有部分平台版本额外携带 `op_member_openid` 时才能映射操作者和 `kick`。
 - 消息事件写入缓存，供 `get_msg`、`get_image`、被动回复和引用使用；重复的官方消息 ID 会被丢弃。
 - 事件转换失败只跳过该事件并记录 WARN，不中断事件源。
+- Gateway 在桥接层处理完事件并尝试提交给下游队列后，才保存用于进程重启的 Resume 序号。同一进程内重连使用最近接收的序号，已排队事件继续处理。若进程在消息写入缓存后、分发前退出，Resume 重放仍可能被消息去重拦截。
+- Webhook 在事件进入内存队列时返回成功，队列满时返回 503 请求 QQ 重试。进程退出会丢失仍在内存中的事件。
 
 ## 7. 传输
 
@@ -185,7 +187,9 @@ WebSocket 请求格式：
 
 同一条连接最多同时执行 64 个请求；广播事件落后时断开该连接并记录原因。
 
-HTTP POST 上报 JSON；请求头包含 `X-Self-ID`；配置了 `secret` 时还包含 `X-Signature: sha1=<hex>`。只有收到 2xx 响应时才执行响应体中的快速操作，且以该事件的 JSON 作为上下文。超时重试可能导致至少一次投递。
+HTTP POST 上报 JSON；请求头包含 `X-Self-ID`；配置了 `secret` 时还包含 `X-Signature: sha1=<hex>`。只有收到 2xx 响应时才执行响应体中的快速操作，且以该事件的 JSON 作为上下文。超时重试可能导致重复投递。队列满、重试耗尽或进程退出都可能丢失事件。
+
+通过 OB11 调用 `get_status` 时，`event_delivery.http_post` 汇总当前进程所有 POST 目标的状态。 `queued` 是等待发送的条数，`queue_rejected` 是入队被拒的累计次数，`retry_exhausted` 是所有尝试失败的累计次数。
 
 ## 8. 错误码
 

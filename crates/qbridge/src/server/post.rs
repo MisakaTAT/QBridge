@@ -4,7 +4,10 @@ use super::{Hub, PostTargetConfig};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha1::Sha1;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 use tokio::sync::mpsc;
 
 const MAX_ATTEMPTS: usize = 4;
@@ -61,6 +64,7 @@ pub fn spawn(
                     }
                 }
                 if !delivered {
+                    hub.post_retry_exhausted.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         target = index,
                         attempts = MAX_ATTEMPTS,

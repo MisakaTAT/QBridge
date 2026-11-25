@@ -12,7 +12,8 @@ use futures_util::StreamExt;
 use qbridge_ob11::event::LifecycleType;
 use qbridge_ob11::{Action, Call};
 use qbridge_qq::{
-    Client, Envelope, GatewayConfig, SessionStore, Webhook, WebhookConfig, gateway::GatewayStream,
+    Client, Envelope, GatewayConfig, SessionStore, Webhook, WebhookConfig,
+    gateway::{GatewayAcknowledgement, GatewayStream},
     webhook::WebhookStream,
 };
 use serde_json::Value;
@@ -116,10 +117,10 @@ impl Source {
         }
     }
 
-    async fn next(&mut self) -> Option<Envelope> {
+    async fn next(&mut self) -> Option<(Envelope, Option<GatewayAcknowledgement>)> {
         match self {
-            Self::Gateway(stream) => stream.next().await,
-            Self::Webhook(stream) => stream.next().await,
+            Self::Gateway(stream) => stream.next_dispatch().await,
+            Self::Webhook(stream) => stream.next().await.map(|envelope| (envelope, None)),
         }
     }
 }
@@ -230,12 +231,15 @@ async fn run_once(
                 _ = pump_cancel.cancelled() => break,
                 _ = hub_cancel.cancelled() => break,
                 envelope = source.next() => {
-                    let Some(envelope) = envelope else {
+                    let Some((envelope, acknowledgement)) = envelope else {
                         let _ = source_end_tx.try_send(());
                         break;
                     };
                     if let Some(event) = pump_bridge.translate(envelope).await {
                         pump_hub.publish(event);
+                    }
+                    if let Some(acknowledgement) = acknowledgement {
+                        acknowledgement.acknowledge().await;
                     }
                 }
             }

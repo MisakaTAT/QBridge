@@ -10,7 +10,7 @@ use crate::{
     redact,
 };
 use async_trait::async_trait;
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt, future::BoxFuture};
 use serde_json::{Value, json};
 use std::{
     pin::Pin,
@@ -32,6 +32,12 @@ use url::Url;
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+mod checkpoint;
+use checkpoint::CheckpointWriter;
+pub use checkpoint::GatewayAcknowledgement;
+
+type DispatchItem = (Envelope, Option<GatewayAcknowledgement>);
 
 /// 可持久化的 Gateway 会话。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +97,8 @@ impl Default for GatewayConfig {
 
 /// Gateway 事件流。丢弃时自动停止后台任务。
 pub struct GatewayStream {
-    receiver: mpsc::Receiver<Envelope>,
+    receiver: mpsc::Receiver<DispatchItem>,
+    pending: Option<BoxFuture<'static, Envelope>>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
     online: Arc<AtomicBool>,
@@ -102,13 +109,38 @@ impl GatewayStream {
     pub fn online(&self) -> Arc<AtomicBool> {
         self.online.clone()
     }
+
+    /// 按顺序处理事件，并在处理完成后调用确认句柄。
+    /// 消费者应始终使用此方法或始终使用 `Stream` 接口。
+    pub async fn next_dispatch(&mut self) -> Option<(Envelope, Option<GatewayAcknowledgement>)> {
+        self.receiver.recv().await
+    }
 }
 
 impl Stream for GatewayStream {
     type Item = Envelope;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(context)
+        if self.pending.is_none() {
+            let Some((envelope, acknowledgement)) =
+                std::task::ready!(self.receiver.poll_recv(context))
+            else {
+                return Poll::Ready(None);
+            };
+            let Some(acknowledgement) = acknowledgement else {
+                return Poll::Ready(Some(envelope));
+            };
+            self.pending = Some(Box::pin(async move {
+                acknowledgement.acknowledge().await;
+                envelope
+            }));
+        }
+        let Some(pending) = self.pending.as_mut() else {
+            return Poll::Pending;
+        };
+        let envelope = std::task::ready!(pending.as_mut().poll(context));
+        self.pending = None;
+        Poll::Ready(Some(envelope))
     }
 }
 
@@ -131,13 +163,14 @@ pub fn connect(
     let task = tokio::spawn(run(
         client,
         config,
-        store,
+        Arc::new(CheckpointWriter::new(store)),
         cancel.clone(),
         sender,
         online.clone(),
     ));
     GatewayStream {
         receiver,
+        pending: None,
         cancel,
         task,
         online,
@@ -156,21 +189,21 @@ fn reconnect(reason: &'static str, ready: bool) -> Failure {
 async fn run(
     client: Arc<Client>,
     config: GatewayConfig,
-    store: Arc<dyn SessionStore>,
+    checkpoint: Arc<CheckpointWriter>,
     cancel: CancellationToken,
-    out: mpsc::Sender<Envelope>,
+    out: mpsc::Sender<DispatchItem>,
     online: Arc<AtomicBool>,
 ) {
-    let mut session = match store.load().await {
-        Ok(Some(session)) if session.intents == config.intents.bits() => Some(session),
+    let mut session = match checkpoint.store.load().await {
+        Ok(Some(session)) if session.intents == config.intents.bits() => {
+            checkpoint
+                .activate(&session.session_id, Some(session.seq))
+                .await;
+            Some(session)
+        }
         Ok(Some(_)) => {
             tracing::info!("persisted Gateway session intents changed; starting a new session");
-            if let Err(error) = store.clear().await {
-                tracing::warn!(
-                    reason = %redact::text(&error.to_string()),
-                    "cannot clear Gateway session after intents change"
-                );
-            }
+            checkpoint.clear().await;
             None
         }
         Ok(None) => None,
@@ -190,7 +223,7 @@ async fn run(
         match run_once(
             &client,
             &config,
-            store.as_ref(),
+            &checkpoint,
             &cancel,
             &out,
             &online,
@@ -259,9 +292,9 @@ enum Control {
 async fn run_once(
     client: &Client,
     config: &GatewayConfig,
-    store: &dyn SessionStore,
+    checkpoint: &Arc<CheckpointWriter>,
     cancel: &CancellationToken,
-    out: &mpsc::Sender<Envelope>,
+    out: &mpsc::Sender<DispatchItem>,
     online: &Arc<AtomicBool>,
     session: &mut Option<Session>,
 ) -> Result<bool, Failure> {
@@ -417,12 +450,7 @@ async fn run_once(
                                 tracing::warn!("QQ Gateway invalidated the session; clearing it");
                                 *session = None;
                                 sequence.store(0, Ordering::Release);
-                                if let Err(error) = store.clear().await {
-                                    tracing::warn!(
-                                        reason = %redact::text(&error.to_string()),
-                                        "cannot clear invalidated Gateway session"
-                                    );
-                                }
+                                checkpoint.clear().await;
                                 break Err(reconnect("gateway invalidated the session", false));
                             }
                             Some(0) => {
@@ -452,12 +480,7 @@ async fn run_once(
                                         seq: seq.unwrap_or(0),
                                         intents: config.intents.bits(),
                                     };
-                                    if let Err(error) = store.save(&new_session).await {
-                                        tracing::warn!(
-                                            reason = %redact::text(&error.to_string()),
-                                            "cannot persist new Gateway session"
-                                        );
-                                    }
+                                    checkpoint.activate(session_id, None).await;
                                     *session = Some(new_session);
                                     ready = true;
                                     tracing::info!("QQ Gateway ready");
@@ -470,13 +493,6 @@ async fn run_once(
                                     sequence.store(seq, Ordering::Release);
                                     if let Some(current) = session.as_mut() {
                                         current.seq = seq;
-                                        let snapshot = current.clone();
-                                        if let Err(error) = store.save(&snapshot).await {
-                                            tracing::warn!(
-                                                reason = %redact::text(&error.to_string()),
-                                                "cannot persist Gateway sequence"
-                                            );
-                                        }
                                     }
                                 }
                                 let envelope = Envelope::parse(
@@ -485,7 +501,14 @@ async fn run_once(
                                     data,
                                 );
                                 backpressured.store(true, Ordering::Release);
-                                let sent = out.send(envelope).await;
+                                let confirmed_sequence = seq.or((event_type == "READY").then_some(0));
+                                let acknowledgement = checkpoint
+                                    .acknowledgement(confirmed_sequence, config.intents.bits())
+                                    .await;
+                                let sent = tokio::select! {
+                                    _ = cancel.cancelled() => break Ok(ready),
+                                    sent = out.send((envelope, acknowledgement)) => sent,
+                                };
                                 backpressured.store(false, Ordering::Release);
                                 if sent.is_err() {
                                     break Ok(ready);
@@ -511,12 +534,7 @@ async fn run_once(
                             if reset_session_on_close(code) {
                                 *session = None;
                                 sequence.store(0, Ordering::Release);
-                                if let Err(error) = store.clear().await {
-                                    tracing::warn!(
-                                        reason = %redact::text(&error.to_string()),
-                                        "cannot clear Gateway session after close"
-                                    );
-                                }
+                                checkpoint.clear().await;
                             }
                         }
                         break Err(reconnect("gateway closed by peer", ready));

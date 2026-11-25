@@ -375,6 +375,40 @@ async fn resumes_persisted_session() {
 }
 
 #[tokio::test]
+async fn keeps_buffered_dispatches_out_of_the_persisted_resume_checkpoint() {
+    let fake = start().await;
+    fake.push(Script {
+        after_auth: vec![group_message(6, "queued")],
+        close_after_auth: Some(1000),
+        ..Script::default()
+    });
+    let store = Arc::new(Store::with_session(Session {
+        session_id: "SAVED".into(),
+        seq: 5,
+        intents: Intents::GROUP_AND_C2C.bits(),
+    }));
+    let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while received_ops(&fake).len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fake.received()[1]["d"]["seq"], 6);
+    assert_eq!(store.session().unwrap().seq, 5);
+    let (dispatch, acknowledgement) =
+        tokio::time::timeout(Duration::from_secs(2), harness.stream.next_dispatch())
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(dispatch.dispatch, Dispatch::GroupAtMessage(_)));
+    assert_eq!(store.session().unwrap().seq, 5);
+    acknowledgement.unwrap().acknowledge().await;
+    assert_eq!(store.session().unwrap().seq, 6);
+}
+
+#[tokio::test]
 async fn drops_duplicate_sequence_numbers() {
     let fake = start().await;
     fake.push(Script {
