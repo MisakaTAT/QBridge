@@ -365,25 +365,187 @@ async fn cleans_expired_messages_but_keeps_identities() {
 #[tokio::test]
 async fn gateway_session_round_trips() {
     let store = memory_store();
-    assert!(store.gateway_session().await.unwrap().is_none());
+    assert!(store.gateway_session(0).await.unwrap().is_none());
     store
-        .save_gateway_session(&Session {
-            session_id: "S".into(),
-            seq: 7,
-            intents: 123,
-        })
+        .save_gateway_session(
+            0,
+            &Session {
+                session_id: "S0".into(),
+                seq: 7,
+                intents: 123,
+                shard_count: 2,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .save_gateway_session(
+            1,
+            &Session {
+                session_id: "S1".into(),
+                seq: 11,
+                intents: 123,
+                shard_count: 2,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
-        store.gateway_session().await.unwrap(),
+        store.gateway_session(0).await.unwrap(),
         Some(Session {
-            session_id: "S".into(),
+            session_id: "S0".into(),
             seq: 7,
-            intents: 123
+            intents: 123,
+            shard_count: 2,
         })
     );
-    store.clear_gateway_session().await.unwrap();
-    assert!(store.gateway_session().await.unwrap().is_none());
+    assert_eq!(
+        store.gateway_session(1).await.unwrap(),
+        Some(Session {
+            session_id: "S1".into(),
+            seq: 11,
+            intents: 123,
+            shard_count: 2,
+        })
+    );
+    store.clear_gateway_session(0).await.unwrap();
+    assert!(store.gateway_session(0).await.unwrap().is_none());
+    assert!(store.gateway_session(1).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn migrates_v3_gateway_session_to_v4() {
+    let path = temp_db();
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), app_id TEXT NOT NULL);
+                 INSERT INTO meta(id, app_id) VALUES(1, 'app');
+                 CREATE TABLE gateway_session (
+                    single INTEGER PRIMARY KEY CHECK(single=1),
+                    session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    intents INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO gateway_session(single, session_id, seq, intents) VALUES(1, 'LEGACY', 42, 999);
+                 PRAGMA user_version=3;",
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path, "app").unwrap();
+    assert_eq!(
+        store.gateway_session(0).await.unwrap(),
+        Some(Session {
+            session_id: "LEGACY".into(),
+            seq: 42,
+            intents: 999,
+            shard_count: 1,
+        })
+    );
+    store
+        .save_gateway_session(
+            1,
+            &Session {
+                session_id: "SHARD-1".into(),
+                seq: 3,
+                intents: 999,
+                shard_count: 2,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.gateway_session(1).await.unwrap().unwrap().session_id,
+        "SHARD-1"
+    );
+    drop(store);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 4);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn updates_outbound_content_expiry_and_reference() {
+    let store = memory_store();
+    let conversation = Conversation::Private(1);
+    let id = store
+        .save_outbound(
+            conversation,
+            "S1",
+            100,
+            200,
+            &text_event(100, "part1"),
+            Some("REF-1"),
+        )
+        .await
+        .unwrap();
+    store
+        .update_outbound(id, 400, &text_event(120, "part1+part2"), None)
+        .await
+        .unwrap();
+    let cached = store.message(id, 250).await.unwrap().unwrap();
+    assert_eq!(cached["message_id"], id);
+    assert_eq!(cached["message"][0]["data"]["text"], "part1+part2");
+    let quote = store.quote(conversation, id, 250).await.unwrap();
+    assert_eq!(quote.reference.as_deref(), Some("REF-1"));
+
+    store
+        .update_outbound(id, 500, &text_event(130, "done"), Some("REF-2"))
+        .await
+        .unwrap();
+    let quote = store.quote(conversation, id, 450).await.unwrap();
+    assert_eq!(quote.reference.as_deref(), Some("REF-2"));
+}
+
+#[tokio::test]
+async fn passive_reply_enforces_passive_window_even_when_cache_lives_longer() {
+    let store = memory_store();
+    let group = store
+        .identity(IdentityKind::Group, "group-window")
+        .await
+        .unwrap();
+    let conversation = Conversation::Group(group);
+    let id = store
+        .save_inbound(
+            conversation,
+            "in-1",
+            1000,
+            1000 + 3600,
+            &text_event(1000, "hi"),
+            Some("REF-IN"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .reserve_reply(conversation, Some(id), 1000 + GROUP_PASSIVE_WINDOW - 1)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        store
+            .reserve_reply(conversation, Some(id), 1000 + GROUP_PASSIVE_WINDOW)
+            .await,
+        Err(Error::ReplyContextUnavailable)
+    ));
+    assert!(
+        store
+            .message(id, 1000 + GROUP_PASSIVE_WINDOW + 10)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .quote(conversation, id, 1000 + GROUP_PASSIVE_WINDOW + 10)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

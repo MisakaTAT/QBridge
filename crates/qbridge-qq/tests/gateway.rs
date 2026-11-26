@@ -5,17 +5,18 @@ use axum::{
         State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::StreamExt;
 use qbridge_qq::{
     Client, Dispatch, Envelope, Error, GatewayConfig, GatewayStream, Intents, Session,
-    SessionStore, gateway::connect,
+    SessionStore, ShardConfig, gateway::connect,
 };
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -39,9 +40,17 @@ struct Inner {
     received: Vec<Value>,
     connections: usize,
     ws_url: String,
+    bot_shards: Option<u32>,
+    max_concurrency: u32,
 }
 
 impl FakeGateway {
+    fn set_bot_shards(&self, shards: u32, max_concurrency: u32) {
+        let mut inner = self.0.lock().unwrap();
+        inner.bot_shards = Some(shards);
+        inner.max_concurrency = max_concurrency;
+    }
+
     fn push(&self, script: Script) {
         self.0.lock().unwrap().scripts.push_back(script);
     }
@@ -63,6 +72,8 @@ async fn start() -> FakeGateway {
         received: Vec::new(),
         connections: 0,
         ws_url: format!("ws://{address}/ws"),
+        bot_shards: None,
+        max_concurrency: 1,
     })));
     let app = Router::new()
         .route(
@@ -70,6 +81,33 @@ async fn start() -> FakeGateway {
             get(|State(fake): State<FakeGateway>| async move {
                 let url = fake.0.lock().unwrap().ws_url.clone();
                 axum::Json(json!({"url": url}))
+            }),
+        )
+        .route(
+            "/gateway/bot",
+            get(|State(fake): State<FakeGateway>| async move {
+                let (url, shards, max_concurrency) = {
+                    let inner = fake.0.lock().unwrap();
+                    (
+                        inner.ws_url.clone(),
+                        inner.bot_shards,
+                        inner.max_concurrency,
+                    )
+                };
+                match shards {
+                    Some(shards) => axum::Json(json!({
+                        "url": url,
+                        "shards": shards,
+                        "session_start_limit": {
+                            "total": 1000,
+                            "remaining": 999,
+                            "reset_after": 14400000,
+                            "max_concurrency": max_concurrency
+                        }
+                    }))
+                    .into_response(),
+                    None => (StatusCode::NOT_FOUND, "not found").into_response(),
+                }
             }),
         )
         .route(
@@ -175,40 +213,53 @@ async fn run_socket(mut socket: WebSocket, fake: FakeGateway) {
 
 #[derive(Default)]
 struct Store {
-    session: Mutex<Option<Session>>,
+    sessions: Mutex<HashMap<u32, Session>>,
     saves: AtomicUsize,
     clears: AtomicUsize,
 }
 
 #[async_trait]
 impl SessionStore for Store {
-    async fn load(&self) -> Result<Option<Session>, Error> {
-        Ok(self.session.lock().unwrap().clone())
+    async fn load(&self, shard_id: u32) -> Result<Option<Session>, Error> {
+        Ok(self.sessions.lock().unwrap().get(&shard_id).cloned())
     }
 
-    async fn save(&self, session: &Session) -> Result<(), Error> {
+    async fn save(&self, shard_id: u32, session: &Session) -> Result<(), Error> {
         self.saves.fetch_add(1, Ordering::Relaxed);
-        *self.session.lock().unwrap() = Some(session.clone());
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(shard_id, session.clone());
         Ok(())
     }
 
-    async fn clear(&self) -> Result<(), Error> {
+    async fn clear(&self, shard_id: u32) -> Result<(), Error> {
         self.clears.fetch_add(1, Ordering::Relaxed);
-        *self.session.lock().unwrap() = None;
+        self.sessions.lock().unwrap().remove(&shard_id);
         Ok(())
     }
 }
 
 impl Store {
     fn with_session(session: Session) -> Self {
+        Self::with_shard_session(0, session)
+    }
+
+    fn with_shard_session(shard_id: u32, session: Session) -> Self {
+        let mut sessions = HashMap::new();
+        sessions.insert(shard_id, session);
         Self {
-            session: Mutex::new(Some(session)),
+            sessions: Mutex::new(sessions),
             ..Self::default()
         }
     }
 
     fn session(&self) -> Option<Session> {
-        self.session.lock().unwrap().clone()
+        self.shard_session(0)
+    }
+
+    fn shard_session(&self, shard_id: u32) -> Option<Session> {
+        self.sessions.lock().unwrap().get(&shard_id).cloned()
     }
 
     fn clears(&self) -> usize {
@@ -239,9 +290,11 @@ impl Harness {
     fn default_config() -> GatewayConfig {
         GatewayConfig {
             intents: Intents::GROUP_AND_C2C,
+            shard: ShardConfig::Auto,
             reconnect_initial: Duration::from_millis(10),
             reconnect_max: Duration::from_millis(50),
             ready_timeout: Duration::from_secs(2),
+            identify_delay: Duration::from_millis(5),
             event_capacity: 16,
         }
     }
@@ -332,6 +385,7 @@ async fn starts_a_new_session_when_intents_change() {
         session_id: "OLD".into(),
         seq: 5,
         intents: 0,
+        shard_count: 1,
     }));
     let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
 
@@ -359,6 +413,7 @@ async fn resumes_persisted_session() {
         session_id: "SAVED".into(),
         seq: 5,
         intents: Intents::GROUP_AND_C2C.bits(),
+        shard_count: 1,
     }));
     let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
 
@@ -386,6 +441,7 @@ async fn keeps_buffered_dispatches_out_of_the_persisted_resume_checkpoint() {
         session_id: "SAVED".into(),
         seq: 5,
         intents: Intents::GROUP_AND_C2C.bits(),
+        shard_count: 1,
     }));
     let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -534,4 +590,132 @@ async fn sends_heartbeats() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(fake.connections(), 1);
+}
+
+#[tokio::test]
+async fn auto_discovers_multiple_shards_from_gateway_bot_and_tracks_sessions_separately() {
+    let fake = start().await;
+    fake.set_bot_shards(2, 2);
+    fake.push(Script {
+        after_auth: vec![ready("SHARD-A", 1), group_message(2, "from-a")],
+        ..Script::default()
+    });
+    fake.push(Script {
+        after_auth: vec![ready("SHARD-B", 1), group_message(2, "from-b")],
+        ..Script::default()
+    });
+    let store = Arc::new(Store::default());
+    let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
+
+    let mut contents = Vec::new();
+    for _ in 0..4 {
+        let event = next(&mut harness.stream).await.unwrap();
+        if let Dispatch::GroupAtMessage(message) = event.dispatch {
+            contents.push(message.content);
+        }
+    }
+    contents.sort();
+    assert_eq!(contents, vec!["from-a", "from-b"]);
+    assert_eq!(fake.connections(), 2);
+
+    let mut shards = fake
+        .received()
+        .into_iter()
+        .filter(|value| value["op"] == 2)
+        .map(|value| value["d"]["shard"].clone())
+        .collect::<Vec<_>>();
+    shards.sort_by_key(|value| value.to_string());
+    assert_eq!(shards, vec![json!([0, 2]), json!([1, 2])]);
+
+    let shard0 = store.shard_session(0).unwrap();
+    let shard1 = store.shard_session(1).unwrap();
+    assert_eq!(shard0.shard_count, 2);
+    assert_eq!(shard1.shard_count, 2);
+    assert_ne!(shard0.session_id, shard1.session_id);
+    assert_eq!(shard0.seq, 2);
+    assert_eq!(shard1.seq, 2);
+    assert!(harness.stream.online().load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn invalidates_persisted_session_when_shard_count_changes() {
+    let fake = start().await;
+    fake.set_bot_shards(2, 2);
+    fake.push(Script {
+        after_auth: vec![ready("NEW-0", 1)],
+        ..Script::default()
+    });
+    fake.push(Script {
+        after_auth: vec![ready("NEW-1", 1)],
+        ..Script::default()
+    });
+    let store = Arc::new(Store::with_shard_session(
+        0,
+        Session {
+            session_id: "OLD-SINGLE".into(),
+            seq: 9,
+            intents: Intents::GROUP_AND_C2C.bits(),
+            shard_count: 1,
+        },
+    ));
+    let mut harness = Harness::new(fake.clone(), store.clone(), Harness::default_config());
+    let _ = next(&mut harness.stream).await.unwrap();
+    let _ = next(&mut harness.stream).await.unwrap();
+
+    assert_eq!(received_ops(&fake), vec![2, 2]);
+    assert_eq!(store.clears(), 1);
+    assert_eq!(store.shard_session(0).unwrap().shard_count, 2);
+}
+
+#[tokio::test]
+async fn single_shard_config_runs_only_requested_shard() {
+    let fake = start().await;
+    fake.set_bot_shards(4, 1);
+    fake.push(Script {
+        after_auth: vec![ready("S-2", 1)],
+        ..Script::default()
+    });
+    let store = Arc::new(Store::default());
+    let mut config = Harness::default_config();
+    config.shard = ShardConfig::Single { id: 2, count: 4 };
+    let mut harness = Harness::new(fake.clone(), store.clone(), config);
+
+    let _ = next(&mut harness.stream).await.unwrap();
+    assert_eq!(fake.connections(), 1);
+    let identify = &fake.received()[0];
+    assert_eq!(identify["op"], 2);
+    assert_eq!(identify["d"]["shard"], json!([2, 4]));
+    assert!(store.shard_session(0).is_none());
+    let saved = store.shard_session(2).unwrap();
+    assert_eq!(saved.session_id, "S-2");
+    assert_eq!(saved.shard_count, 4);
+}
+
+#[tokio::test]
+async fn fatal_close_on_one_shard_stops_all_shards() {
+    let fake = start().await;
+    fake.set_bot_shards(2, 2);
+    fake.push(Script {
+        after_auth: vec![ready("S0", 1)],
+        close_after_auth: Some(4010),
+        ..Script::default()
+    });
+    fake.push(Script {
+        after_auth: vec![ready("S1", 1)],
+        ..Script::default()
+    });
+    let mut harness = Harness::new(
+        fake.clone(),
+        Arc::new(Store::default()),
+        Harness::default_config(),
+    );
+    let mut ended = false;
+    for _ in 0..4 {
+        if next(&mut harness.stream).await.is_none() {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended);
+    assert!(!harness.stream.online().load(Ordering::Acquire));
 }

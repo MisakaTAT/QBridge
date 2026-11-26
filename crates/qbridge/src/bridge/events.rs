@@ -286,7 +286,11 @@ async fn save_message_event(
     if let EventKind::Message(message) = &mut event.kind {
         message.extra.insert("qq".into(), Value::Object(qq));
     }
-    let expires = time + conversation.passive_window();
+    let cache_ttl = bridge
+        .cache
+        .inbound_ttl_secs
+        .max(conversation.passive_window());
+    let expires = time.saturating_add(cache_ttl);
     let content = event.to_value(qbridge_ob11::MessageFormat::Array);
     let id = match bridge
         .store

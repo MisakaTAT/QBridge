@@ -154,11 +154,12 @@ async fn run_once(
     });
     let source = create_source(&config.qq, &config.limits, qq.clone(), &store).await?;
     let online = source.online();
-    let bridge = Arc::new(Bridge::new(
+    let bridge = Arc::new(Bridge::with_cache(
         qq.clone(),
         store.clone(),
         config.self_id,
         online.clone(),
+        config.cache.policy(),
     ));
     let (restart_tx, mut restart_rx) = mpsc::channel::<u64>(1);
     let handler = Arc::new(AppHandler {
@@ -254,20 +255,24 @@ async fn run_once(
         }
     });
     let cleanup_store = store.clone();
+    let cleanup_bridge = bridge.clone();
     let cleanup_cancel = cancel.clone();
     let cleanup_hub = hub.clone();
+    let cleanup_interval = config.cache.cleanup_interval;
     let cleanup_task = tokio::spawn(async move {
         let hub_cancel = cleanup_hub.cancellation();
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut ticker = tokio::time::interval(cleanup_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cleanup_cancel.cancelled() => break,
                 _ = hub_cancel.cancelled() => break,
                 _ = ticker.tick() => {
-                    if let Err(error) = cleanup_store.clean_expired(crate::bridge::unix_now()).await {
+                    let now = crate::bridge::unix_now();
+                    if let Err(error) = cleanup_store.clean_expired(now).await {
                         tracing::warn!(reason = %error, "expired message cleanup failed");
                     }
+                    cleanup_bridge.clean_expired_streams(now).await;
                 }
             }
         }
@@ -328,6 +333,7 @@ async fn create_source(
                 qq,
                 GatewayConfig {
                     intents: qq_config.intents,
+                    shard: qq_config.shards,
                     event_capacity: limits.queue_capacity,
                     ..GatewayConfig::default()
                 },

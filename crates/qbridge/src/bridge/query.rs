@@ -102,5 +102,6 @@ pub fn version() -> Result<Value, ActionError> {
 
 pub async fn clean_cache(bridge: &Bridge, now: i64) -> Result<Value, ActionError> {
     bridge.store.clean_expired(now).await?;
+    bridge.clean_expired_streams(now).await;
     Ok(Value::Null)
 }

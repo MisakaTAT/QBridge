@@ -75,6 +75,7 @@ const PANEL: &str = "/v2/panels/{panel_id}";
 const PANEL_TARGET: &str = "/v2/panels/{panel_id}/target";
 const INTERACTION_ACK: &str = "/interactions/{interaction_id}";
 const GATEWAY: &str = "/gateway";
+const GATEWAY_BOT: &str = "/gateway/bot";
 
 /// Gateway 订阅的 intents 位掩码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +160,37 @@ fn deserialize_seconds<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Res
 #[derive(Deserialize)]
 struct GatewayUrl {
     url: String,
+}
+
+fn default_shards() -> u32 {
+    1
+}
+
+fn default_max_concurrency() -> u32 {
+    1
+}
+
+/// `/gateway/bot` 返回的会话启动限额信息。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SessionStartLimit {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub remaining: u32,
+    #[serde(default)]
+    pub reset_after: u64,
+    #[serde(default = "default_max_concurrency")]
+    pub max_concurrency: u32,
+}
+
+/// `/gateway/bot` 返回的带分片建议的 Gateway 信息。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GatewayBot {
+    pub url: String,
+    #[serde(default = "default_shards")]
+    pub shards: u32,
+    #[serde(default)]
+    pub session_start_limit: Option<SessionStartLimit>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1160,6 +1192,20 @@ impl Client {
             return Err(Error::decode("gateway response omitted url"));
         }
         Ok(response.url)
+    }
+
+    /// 获取带分片建议与启动限额的 Gateway 信息。
+    pub async fn gateway_bot(&self) -> Result<GatewayBot, Error> {
+        let response: GatewayBot = self
+            .request(Method::GET, GATEWAY_BOT, &[], &[], None)
+            .await?;
+        if response.url.is_empty() {
+            return Err(Error::decode("gateway/bot response omitted url"));
+        }
+        if response.shards == 0 {
+            return Err(Error::decode("gateway/bot response returned zero shards"));
+        }
+        Ok(response)
     }
 
     /// 获取 access token，临近过期时自动刷新。

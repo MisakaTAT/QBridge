@@ -6,7 +6,7 @@ use crate::{
         plan::{self, Body, MediaKind, MediaPlan, MediaSource, Plan, StreamState, TextPart},
     },
     error::{ActionError, NotFoundKind},
-    store::{Conversation, SENT_CACHE_TTL},
+    store::Conversation,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use qbridge_ob11::{
@@ -461,6 +461,8 @@ async fn deliver(
             ));
         };
         let key = resolved.conversation.target();
+        let user_lock = bridge.streams.lock_user(key).await;
+        let _stream_guard = user_lock.lock().await;
         let (stream_msg_id, index, msg_id, msg_seq, content_raw, local_id) = match state {
             StreamState::Start => {
                 if resolved.active {
@@ -482,10 +484,13 @@ async fn deliver(
                 )
             }
             StreamState::Mid | StreamState::Finish => {
-                let progress = bridge.streams.lock().await;
-                let progress = progress.get(&key).cloned().ok_or_else(|| {
-                    ActionError::BadParam("stream mid/finish without a started stream".into())
-                })?;
+                let progress = bridge
+                    .streams
+                    .get_valid(key, now, bridge.cache.stream_ttl_secs)
+                    .await
+                    .ok_or_else(|| {
+                        ActionError::BadParam("stream mid/finish without a started stream".into())
+                    })?;
                 let content = format!("{}{}", progress.text, text);
                 (
                     Some(progress.id),
@@ -509,30 +514,49 @@ async fn deliver(
             msg_seq,
         };
         let sent = bridge.qq.send_stream(&user, &request).await?;
-        if sent.id.is_empty() {
-            return Err(ActionError::SendOutcomeUnknown);
-        }
-        let local_id = match local_id {
-            Some(local_id) => local_id,
-            None => record(bridge, resolved.conversation, &sent, cached_message, now).await?,
-        };
-        let mut streams = bridge.streams.lock().await;
-        if state == StreamState::Finish {
-            streams.remove(&key);
+        let resolved_stream_id = if !sent.id.is_empty() {
+            sent.id.clone()
+        } else if let Some(existing) = base_stream_id.clone() {
+            existing
         } else {
-            streams.insert(
-                key,
-                crate::bridge::StreamProgress {
-                    id: base_stream_id.unwrap_or_else(|| sent.id.clone()),
-                    index,
-                    msg_id: request.msg_id,
-                    msg_seq: request.msg_seq,
-                    text: content_raw,
+            return Err(ActionError::SendOutcomeUnknown);
+        };
+        let stream_message = stream_cache_message(&content_raw);
+        let local_id = match local_id {
+            Some(local_id) => {
+                update_record(
+                    bridge,
                     local_id,
-                },
-            );
+                    resolved.conversation,
+                    &resolved_stream_id,
+                    &sent,
+                    stream_message,
+                    now,
+                )
+                .await;
+                local_id
+            }
+            None => record(bridge, resolved.conversation, &sent, stream_message, now).await?,
+        };
+        if state == StreamState::Finish {
+            bridge.streams.remove(key).await;
+        } else {
+            bridge
+                .streams
+                .set(
+                    key,
+                    crate::bridge::StreamProgress {
+                        id: base_stream_id.unwrap_or(resolved_stream_id),
+                        index,
+                        msg_id: request.msg_id,
+                        msg_seq: request.msg_seq,
+                        text: content_raw,
+                        local_id,
+                        updated_at: now,
+                    },
+                )
+                .await;
         }
-        drop(streams);
         return Ok(local_id);
     }
     let context = if resolved.active {
@@ -669,13 +693,22 @@ fn peer(conversation: Conversation, openid: &str) -> Result<Peer, ActionError> {
     }
 }
 
-async fn record(
+fn stream_cache_message(text: &str) -> Message {
+    if text.is_empty() {
+        Message(Vec::new())
+    } else {
+        Message(vec![Segment::Text(text.to_owned())])
+    }
+}
+
+async fn outbound_event_content(
     bridge: &Bridge,
     conversation: Conversation,
+    official_id: &str,
     sent: &qbridge_qq::SentMessage,
     message: Message,
     now: i64,
-) -> Result<i32, ActionError> {
+) -> Value {
     let scene = match conversation {
         Conversation::Private(_) => MessageScene::Private {
             sub_type: PrivateSubType::Friend,
@@ -699,7 +732,7 @@ async fn record(
     };
     let mut qq = Map::new();
     qq.insert("local_cache".into(), Value::Bool(true));
-    qq.insert("message_id".into(), Value::String(sent.id.clone()));
+    qq.insert("message_id".into(), Value::String(official_id.to_owned()));
     if let Some(ext_info) = &sent.ext_info {
         qq.insert(
             "ext_info".into(),
@@ -709,7 +742,17 @@ async fn record(
     if let EventKind::Message(message) = &mut event.kind {
         message.extra.insert("qq".into(), Value::Object(qq));
     }
-    let content = event.to_value(MessageFormat::Array);
+    event.to_value(MessageFormat::Array)
+}
+
+async fn record(
+    bridge: &Bridge,
+    conversation: Conversation,
+    sent: &qbridge_qq::SentMessage,
+    message: Message,
+    now: i64,
+) -> Result<i32, ActionError> {
+    let content = outbound_event_content(bridge, conversation, &sent.id, sent, message, now).await;
     let reference = sent
         .ext_info
         .as_ref()
@@ -720,7 +763,7 @@ async fn record(
             conversation,
             &sent.id,
             now,
-            now + SENT_CACHE_TTL,
+            now.saturating_add(bridge.cache.sent_ttl_secs),
             &content,
             reference,
         )
@@ -734,5 +777,38 @@ async fn record(
             );
             Err(ActionError::SendOutcomeUnknown)
         }
+    }
+}
+
+async fn update_record(
+    bridge: &Bridge,
+    local_id: i32,
+    conversation: Conversation,
+    official_id: &str,
+    sent: &qbridge_qq::SentMessage,
+    message: Message,
+    now: i64,
+) {
+    let content =
+        outbound_event_content(bridge, conversation, official_id, sent, message, now).await;
+    let reference = sent
+        .ext_info
+        .as_ref()
+        .and_then(|ext| ext.ref_idx.as_deref());
+    if let Err(error) = bridge
+        .store
+        .update_outbound(
+            local_id,
+            now.saturating_add(bridge.cache.sent_ttl_secs),
+            &content,
+            reference,
+        )
+        .await
+    {
+        tracing::warn!(
+            message_id = local_id,
+            reason = %error,
+            "QQ accepted a stream chunk but updating the local cache failed"
+        );
     }
 }

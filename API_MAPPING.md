@@ -91,7 +91,7 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 | `card` | 单个 | 群聊图文卡片（`msg_type=8`）；需要 `pic` 和 `url` |
 | `input_notify` | 单个 | 单聊输入状态（`msg_type=6`）；`type` 默认 1，`second` 默认 60；不产生可缓存消息，成功返回 `message_id=0` |
 | `wakeup` | 修饰段 | C2C 互动召回；标记 `is_wakeup=true`，要求单聊目标 |
-| `stream` | 单个 | 单聊流式消息 `start`/`mid`/`finish`，需按顺序发送；`start` 必须带被动回复上下文，`mid`/`finish` 复用同一 `msg_id`/`msg_seq` 和 start 返回的 `stream_msg_id`；`content_raw` 必须为累计全文，不是增量 |
+| `stream` | 单个 | 单聊流式消息 `start`/`mid`/`finish`，按用户串行化发送；`start` 必须带被动回复上下文，`mid`/`finish` 复用同一 `msg_id`/`msg_seq` 和 `stream_msg_id` 并同步刷新本地缓存全文；空闲超过 `cache.stream_ttl_secs` 后自动过期清理 |
 | `avatar` | 内容展开 | 按 `user_id` 展开为 QQ 头像直链 |
 | `group_info` | 内容展开 | `field=group_name/group_brief/member_count/json`，群聊可用 |
 | `member` | 动作标记 | 群成员事件回复标记；发送前移除，不进入正文 |
@@ -154,7 +154,7 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 - 官方 `GROUP_MEMBER_ADD`/`GROUP_MEMBER_REMOVE` 事件体只有 `timestamp`、`group_openid`、`member_openid`（退出事件另有 `user_openid`），**不包含操作者**。因此 `operator_id` 为 `null`，无法仅凭事件判断是群主/管理员操作还是成员主动退出；只有部分平台版本额外携带 `op_member_openid` 时才能映射操作者和 `kick`。
 - 消息事件写入缓存，供 `get_msg`、`get_image`、被动回复和引用使用；重复的官方消息 ID 会被丢弃。
 - 事件转换失败只跳过该事件并记录 WARN，不中断事件源。
-- Gateway 在桥接层处理完事件并尝试提交给下游队列后，才保存用于进程重启的 Resume 序号。同一进程内重连使用最近接收的序号，已排队事件继续处理。若进程在消息写入缓存后、分发前退出，Resume 重放仍可能被消息去重拦截。
+- Gateway 启动时优先调用 `/gateway/bot` 获取地址、推荐分片数与并发限额（不可用时回退 `/gateway`），可通过 `qq.shards` 配置 `"auto"`、总分片数 `N` 或单分片 `[id, count]`。各分片独立保存 Resume 检查点；在桥接层处理完事件并尝试提交给下游队列后，才保存用于进程重启的 Resume 序号。同一进程内重连使用最近接收的序号，已排队事件继续处理。若进程在消息写入缓存后、分发前退出，Resume 重放仍可能被消息去重拦截。
 - Webhook 在事件进入内存队列时返回成功，队列满时返回 503 请求 QQ 重试。进程退出会丢失仍在内存中的事件。
 
 ## 7. 传输

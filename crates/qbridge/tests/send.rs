@@ -865,3 +865,237 @@ async fn uploads_local_images_inside_forward_nodes() {
     assert!(content.contains("#64px #64px"));
     assert!(content.contains("local"));
 }
+
+#[tokio::test]
+async fn stream_updates_cached_message_and_preserves_reference() {
+    let service = service().await;
+    let store = memory_store();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let now = common::now();
+    store
+        .save_inbound(
+            Conversation::Private(user),
+            "IN",
+            now,
+            now + 1000,
+            &message_event("private", user, "hi", now),
+            None,
+        )
+        .await
+        .unwrap();
+    let bridge = service.bridge(store.clone());
+    service.fake.respond(200, json!({"id": "S1"}));
+    service.fake.respond(200, json!({"id": "S1"}));
+    service.fake.respond(
+        200,
+        json!({"id": "S1", "ext_info": {"ref_idx": "STREAM-REF"}}),
+    );
+    let mut local_id = 0_i64;
+    for (kind, text) in [("start", "he"), ("mid", "llo"), ("finish", "!")] {
+        let result = run(
+            &bridge,
+            "send_private_msg",
+            json!({
+                "user_id": user,
+                "message": format!("[CQ:stream,type={kind}]{text}")
+            }),
+        )
+        .await
+        .unwrap();
+        local_id = result["message_id"].as_i64().unwrap();
+    }
+    let cached = run(&bridge, "get_msg", json!({"message_id": local_id}))
+        .await
+        .unwrap();
+    assert_eq!(cached["message_id"], local_id);
+    assert_eq!(cached["raw_message"], "hello!");
+    assert_eq!(cached["message"][0]["data"]["text"], "hello!");
+    let quote = store
+        .quote(Conversation::Private(user), local_id as i32, now)
+        .await
+        .unwrap();
+    assert_eq!(quote.reference.as_deref(), Some("STREAM-REF"));
+}
+
+#[tokio::test]
+async fn expires_idle_stream_sessions_and_cleans_them() {
+    let service = service().await;
+    let store = memory_store();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let now = common::now();
+    store
+        .save_inbound(
+            Conversation::Private(user),
+            "IN",
+            now,
+            now + 1000,
+            &message_event("private", user, "hi", now),
+            None,
+        )
+        .await
+        .unwrap();
+    let bridge = service.bridge_with_cache(
+        store,
+        qbridge::bridge::CachePolicy {
+            stream_ttl_secs: 60,
+            ..qbridge::bridge::CachePolicy::default()
+        },
+    );
+    service.fake.respond(200, json!({"id": "S1"}));
+    run(
+        &bridge,
+        "send_private_msg",
+        json!({"user_id": user, "message": "[CQ:stream,type=start]he"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bridge.clean_expired_streams(now + 30).await, 0);
+    assert_eq!(bridge.clean_expired_streams(now + 61).await, 1);
+    let error = run(
+        &bridge,
+        "send_private_msg",
+        json!({"user_id": user, "message": "[CQ:stream,type=mid]llo"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, ActionError::BadParam(_)));
+}
+
+#[tokio::test]
+async fn serializes_concurrent_stream_chunks_for_the_same_user() {
+    let service = service().await;
+    let store = memory_store();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let now = common::now();
+    store
+        .save_inbound(
+            Conversation::Private(user),
+            "IN",
+            now,
+            now + 1000,
+            &message_event("private", user, "hi", now),
+            None,
+        )
+        .await
+        .unwrap();
+    let bridge = std::sync::Arc::new(service.bridge(store));
+    service.fake.respond(200, json!({"id": "S1"}));
+    service.fake.respond(200, json!({"id": "S1"}));
+    service.fake.respond(200, json!({"id": "S1"}));
+    run(
+        &bridge,
+        "send_private_msg",
+        json!({"user_id": user, "message": "[CQ:stream,type=start]A"}),
+    )
+    .await
+    .unwrap();
+    let (first, second) = tokio::join!(
+        run(
+            &bridge,
+            "send_private_msg",
+            json!({"user_id": user, "message": "[CQ:stream,type=mid]B"}),
+        ),
+        run(
+            &bridge,
+            "send_private_msg",
+            json!({"user_id": user, "message": "[CQ:stream,type=mid]C"}),
+        )
+    );
+    first.unwrap();
+    second.unwrap();
+    let requests = service.fake.requests();
+    let mut indices = requests
+        .iter()
+        .map(|req| req.body["index"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    indices.sort();
+    assert_eq!(indices, vec![0, 1, 2]);
+    let final_text = requests[2].body["content_raw"].as_str().unwrap();
+    assert_eq!(final_text.len(), 3);
+    assert!(final_text.starts_with('A'));
+    assert!(final_text.contains('B'));
+    assert!(final_text.contains('C'));
+}
+
+#[tokio::test]
+async fn applies_custom_cache_ttls_for_sent_inbound_and_profile() {
+    let service = service().await;
+    let store = memory_store();
+    let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
+    let member = store
+        .identity(IdentityKind::Member, "MEMBER")
+        .await
+        .unwrap();
+    let bridge = service.bridge_with_cache(
+        store.clone(),
+        qbridge::bridge::CachePolicy {
+            inbound_ttl_secs: 7200,
+            sent_ttl_secs: 120,
+            profile_ttl_secs: 90,
+            stream_ttl_secs: 60,
+        },
+    );
+    let now = common::now();
+
+    service.fake.respond(200, json!({"id": "OUT-1"}));
+    let sent = run(
+        &bridge,
+        "send_group_msg",
+        json!({"group_id": group, "active": true, "message": "hello"}),
+    )
+    .await
+    .unwrap();
+    let sent_id = sent["message_id"].as_i64().unwrap() as i32;
+    assert!(store.message(sent_id, now + 100).await.unwrap().is_some());
+    assert!(store.message(sent_id, now + 130).await.unwrap().is_none());
+
+    let envelope = qbridge_qq::Envelope::from_json(&json!({
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "id": "IN-1",
+            "content": "ping",
+            "group_openid": "GROUP",
+            "timestamp": chrono::DateTime::from_timestamp(now, 0).unwrap().to_rfc3339(),
+            "author": {"member_openid": "MEMBER"}
+        }
+    }))
+    .unwrap();
+    let event = bridge.translate(envelope).await.unwrap();
+    let inbound_id = event.to_value(qbridge_ob11::MessageFormat::Array)["message_id"]
+        .as_i64()
+        .unwrap() as i32;
+    assert!(
+        store
+            .message(inbound_id, now + 400)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .reserve_reply(Conversation::Group(group), Some(inbound_id), now + 400)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .message(inbound_id, now + 7205)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    service.fake.respond(
+        200,
+        json!({"member_openid": "MEMBER", "username": "Bob", "member_role": "member"}),
+    );
+    run(
+        &bridge,
+        "get_group_member_info",
+        json!({"group_id": group, "user_id": member}),
+    )
+    .await
+    .unwrap();
+    assert!(store.profile(member, now + 60).await.unwrap().is_some());
+    assert!(store.profile(member, now + 100).await.unwrap().is_none());
+}

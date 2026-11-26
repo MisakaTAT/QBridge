@@ -40,6 +40,8 @@ app_id = "123456"
 secret = { env = "QBRIDGE_QQ_SECRET" }
 source = "gateway"                         # gateway | webhook
 intents = ["group_and_c2c", "group_member", "interaction"] # 仅 gateway 使用
+# 仅 gateway 使用："auto"（通过 /gateway/bot 自动分片）、总分片数 N 或单分片 [id, count]
+shards = "auto"
 
 # source = "webhook" 时必须配置。
 [qq.webhook]
@@ -63,3 +65,10 @@ max_body_bytes = 1048576
 max_ws_bytes = 1048576
 queue_capacity = 256
 rate_limit_ms = 500
+
+[cache]
+inbound_ttl_secs = 3600                    # 入站消息缓存时长（秒），不改变 QQ 被动回复窗口
+sent_ttl_secs = 3600                       # 机器人发出消息缓存时长（秒）
+profile_ttl_secs = 600                     # 群成员资料缓存时长（秒）
+stream_ttl_secs = 300                      # 单聊流式消息会话空闲超时（秒）
+cleanup_interval_secs = 60                 # 定期清理过期缓存间隔（秒）

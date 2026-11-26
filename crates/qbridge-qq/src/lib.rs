@@ -14,10 +14,10 @@ pub mod openid;
 pub mod redact;
 pub mod webhook;
 
-pub use client::{Client, Intents, StreamRequest};
+pub use client::{Client, GatewayBot, Intents, SessionStartLimit, StreamRequest};
 pub use dispatch::{Dispatch, Envelope};
 pub use error::Error;
-pub use gateway::{GatewayConfig, GatewayStream, Session, SessionStore};
+pub use gateway::{GatewayConfig, GatewayStream, Session, SessionStore, Shard, ShardConfig};
 pub use message::{
     Card, CardContent, GroupInfo, Keyboard, KeyboardContent, Markdown, MarkdownParam, MediaSource,
     MediaUpload, Member, MemberPage, MessageReference, MuteOp, OutgoingMessage, SentMessage,

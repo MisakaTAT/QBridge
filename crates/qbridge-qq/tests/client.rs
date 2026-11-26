@@ -620,3 +620,56 @@ async fn send_message_accepts_an_empty_object_response() {
         .unwrap();
     assert!(sent.id.is_empty());
 }
+
+#[tokio::test]
+async fn gateway_bot_parses_shards_and_session_start_limit() {
+    let service = service().await;
+    service.fake.respond(
+        200,
+        json!({
+            "url": "wss://api.sgroup.qq.com/websocket",
+            "shards": 4,
+            "session_start_limit": {
+                "total": 1000,
+                "remaining": 998,
+                "reset_after": 14400000,
+                "max_concurrency": 2
+            }
+        }),
+    );
+    let bot = service.client().gateway_bot().await.unwrap();
+    assert_eq!(bot.url, "wss://api.sgroup.qq.com/websocket");
+    assert_eq!(bot.shards, 4);
+    let limit = bot.session_start_limit.unwrap();
+    assert_eq!(limit.total, 1000);
+    assert_eq!(limit.remaining, 998);
+    assert_eq!(limit.reset_after, 14_400_000);
+    assert_eq!(limit.max_concurrency, 2);
+    assert_eq!(service.fake.requests()[0].path, "/gateway/bot");
+}
+
+#[tokio::test]
+async fn gateway_bot_defaults_shards_and_rejects_invalid_values() {
+    let service = service().await;
+    service
+        .fake
+        .respond(200, json!({"url": "wss://api.sgroup.qq.com/websocket"}));
+    let bot = service.client().gateway_bot().await.unwrap();
+    assert_eq!(bot.shards, 1);
+    assert!(bot.session_start_limit.is_none());
+
+    service.fake.respond(
+        200,
+        json!({"url": "wss://api.sgroup.qq.com/websocket", "shards": 0}),
+    );
+    assert!(matches!(
+        service.client().gateway_bot().await,
+        Err(Error::Decode(_))
+    ));
+
+    service.fake.respond(200, json!({"url": "", "shards": 1}));
+    assert!(matches!(
+        service.client().gateway_bot().await,
+        Err(Error::Decode(_))
+    ));
+}

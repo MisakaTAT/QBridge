@@ -1,4 +1,4 @@
-use super::{Session, SessionStore};
+use super::{Session, SessionStore, Shard};
 use crate::redact;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,10 +26,18 @@ impl GatewayAcknowledgement {
             session_id: self.session.to_string(),
             seq: self.sequence,
             intents: self.intents,
+            shard_count: self.writer.shard.count,
         };
-        match self.writer.store.save(&checkpoint).await {
+        match self
+            .writer
+            .store
+            .save(self.writer.shard.id, &checkpoint)
+            .await
+        {
             Ok(()) => active.saved = Some(self.sequence),
             Err(error) => tracing::warn!(
+                shard_id = self.writer.shard.id,
+                shard_count = self.writer.shard.count,
                 reason = %redact::text(&error.to_string()),
                 "cannot persist Gateway checkpoint"
             ),
@@ -44,13 +52,15 @@ struct ActiveSession {
 
 pub(super) struct CheckpointWriter {
     pub(super) store: Arc<dyn SessionStore>,
+    shard: Shard,
     active: Mutex<Option<ActiveSession>>,
 }
 
 impl CheckpointWriter {
-    pub(super) fn new(store: Arc<dyn SessionStore>) -> Self {
+    pub(super) fn new(store: Arc<dyn SessionStore>, shard: Shard) -> Self {
         Self {
             store,
+            shard,
             active: Mutex::new(None),
         }
     }
@@ -65,8 +75,10 @@ impl CheckpointWriter {
     pub(super) async fn clear(&self) {
         let mut active = self.active.lock().await;
         *active = None;
-        if let Err(error) = self.store.clear().await {
+        if let Err(error) = self.store.clear(self.shard.id).await {
             tracing::warn!(
+                shard_id = self.shard.id,
+                shard_count = self.shard.count,
                 reason = %redact::text(&error.to_string()),
                 "cannot clear Gateway checkpoint"
             );

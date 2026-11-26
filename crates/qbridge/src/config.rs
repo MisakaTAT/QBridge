@@ -1,8 +1,15 @@
 //! 配置读取、环境变量解析与校验。
 
-use crate::server::{PostTargetConfig, session::Role};
+use crate::{
+    bridge::{
+        CachePolicy, DEFAULT_INBOUND_CACHE_TTL, DEFAULT_PROFILE_CACHE_TTL,
+        DEFAULT_STREAM_SESSION_TTL,
+    },
+    server::{PostTargetConfig, session::Role},
+    store::SENT_CACHE_TTL,
+};
 use qbridge_ob11::MessageFormat;
-use qbridge_qq::Intents;
+use qbridge_qq::{Intents, ShardConfig};
 use serde::Deserialize;
 use std::{
     net::SocketAddr,
@@ -53,6 +60,8 @@ pub struct Config {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +74,31 @@ pub struct QqConfig {
     #[serde(default = "default_intents")]
     pub intents: Vec<IntentName>,
     #[serde(default)]
+    pub shards: ShardSetting,
+    #[serde(default)]
     pub webhook: Option<WebhookConfig>,
+}
+
+/// Gateway 分片配置：`"auto"`、总分片数 `N` 或单分片 `[id, count]`。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ShardSetting {
+    Mode(ShardMode),
+    Count(u32),
+    Single([u32; 2]),
+}
+
+impl Default for ShardSetting {
+    fn default() -> Self {
+        Self::Mode(ShardMode::Auto)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShardMode {
+    #[default]
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -267,6 +300,53 @@ fn default_rate_limit_ms() -> u64 {
     500
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    #[serde(default = "default_inbound_ttl_secs")]
+    pub inbound_ttl_secs: i64,
+    #[serde(default = "default_sent_ttl_secs")]
+    pub sent_ttl_secs: i64,
+    #[serde(default = "default_profile_ttl_secs")]
+    pub profile_ttl_secs: i64,
+    #[serde(default = "default_stream_ttl_secs")]
+    pub stream_ttl_secs: i64,
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub cleanup_interval_secs: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            inbound_ttl_secs: default_inbound_ttl_secs(),
+            sent_ttl_secs: default_sent_ttl_secs(),
+            profile_ttl_secs: default_profile_ttl_secs(),
+            stream_ttl_secs: default_stream_ttl_secs(),
+            cleanup_interval_secs: default_cleanup_interval_secs(),
+        }
+    }
+}
+
+fn default_inbound_ttl_secs() -> i64 {
+    DEFAULT_INBOUND_CACHE_TTL
+}
+
+fn default_sent_ttl_secs() -> i64 {
+    SENT_CACHE_TTL
+}
+
+fn default_profile_ttl_secs() -> i64 {
+    DEFAULT_PROFILE_CACHE_TTL
+}
+
+fn default_stream_ttl_secs() -> i64 {
+    DEFAULT_STREAM_SESSION_TTL
+}
+
+fn default_cleanup_interval_secs() -> u64 {
+    60
+}
+
 /// 字符串或 `{ env = "NAME" }`。
 #[derive(Clone, Deserialize)]
 #[serde(untagged)]
@@ -314,6 +394,7 @@ pub struct ResolvedConfig {
     pub reverse_ws: Vec<ResolvedReverseWs>,
     pub http_post: Vec<ResolvedHttpPost>,
     pub limits: ResolvedLimits,
+    pub cache: ResolvedCache,
 }
 
 pub struct ResolvedQq {
@@ -321,6 +402,7 @@ pub struct ResolvedQq {
     pub secret: String,
     pub source: QqSource,
     pub intents: Intents,
+    pub shards: ShardConfig,
     pub webhook: Option<WebhookConfig>,
 }
 
@@ -341,6 +423,26 @@ pub struct ResolvedLimits {
     pub max_ws_bytes: usize,
     pub queue_capacity: usize,
     pub rate_limit: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedCache {
+    pub inbound_ttl_secs: i64,
+    pub sent_ttl_secs: i64,
+    pub profile_ttl_secs: i64,
+    pub stream_ttl_secs: i64,
+    pub cleanup_interval: Duration,
+}
+
+impl ResolvedCache {
+    pub fn policy(&self) -> CachePolicy {
+        CachePolicy {
+            inbound_ttl_secs: self.inbound_ttl_secs,
+            sent_ttl_secs: self.sent_ttl_secs,
+            profile_ttl_secs: self.profile_ttl_secs,
+            stream_ttl_secs: self.stream_ttl_secs,
+        }
+    }
 }
 
 impl ResolvedHttpPost {
@@ -428,6 +530,32 @@ impl Config {
                 "limits must have positive sizes and queue capacity".into(),
             ));
         }
+        let shards = match self.qq.shards {
+            ShardSetting::Mode(ShardMode::Auto) => ShardConfig::Auto,
+            ShardSetting::Count(0) => {
+                return Err(Error::Invalid("qq.shards must be positive".into()));
+            }
+            ShardSetting::Count(count) => ShardConfig::Count(count),
+            ShardSetting::Single([id, count]) => {
+                if count == 0 || id >= count {
+                    return Err(Error::Invalid(
+                        "qq.shards must be [shard_id, shard_count] with shard_id < shard_count and shard_count > 0"
+                            .into(),
+                    ));
+                }
+                ShardConfig::Single { id, count }
+            }
+        };
+        if self.cache.inbound_ttl_secs <= 0
+            || self.cache.sent_ttl_secs <= 0
+            || self.cache.profile_ttl_secs <= 0
+            || self.cache.stream_ttl_secs <= 0
+            || self.cache.cleanup_interval_secs == 0
+        {
+            return Err(Error::Invalid(
+                "cache TTLs and cleanup_interval_secs must be positive".into(),
+            ));
+        }
         if self.http.is_none()
             && self.forward_ws.is_none()
             && self.reverse_ws.is_empty()
@@ -491,6 +619,7 @@ impl Config {
                 secret,
                 source: self.qq.source,
                 intents,
+                shards,
                 webhook: self.qq.webhook.clone(),
             },
             storage_path: self.storage.path.clone(),
@@ -518,6 +647,13 @@ impl Config {
                 max_ws_bytes: self.limits.max_ws_bytes,
                 queue_capacity: self.limits.queue_capacity,
                 rate_limit: Duration::from_millis(self.limits.rate_limit_ms),
+            },
+            cache: ResolvedCache {
+                inbound_ttl_secs: self.cache.inbound_ttl_secs,
+                sent_ttl_secs: self.cache.sent_ttl_secs,
+                profile_ttl_secs: self.cache.profile_ttl_secs,
+                stream_ttl_secs: self.cache.stream_ttl_secs,
+                cleanup_interval: Duration::from_secs(self.cache.cleanup_interval_secs),
             },
         })
     }

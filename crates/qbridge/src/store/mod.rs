@@ -22,7 +22,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// 群聊被动回复窗口。
 pub const GROUP_PASSIVE_WINDOW: i64 = 300;
@@ -345,6 +345,8 @@ impl Store {
             .map_err(database)?;
         if version == 0 {
             schema::initialize(&mut connection)?;
+        } else if version == 3 {
+            schema::migrate_v3_to_v4(&mut connection)?;
         } else if version != SCHEMA_VERSION {
             return Err(Error::SchemaVersion(version));
         }
@@ -1067,6 +1069,39 @@ impl Store {
         .await
     }
 
+    /// 更新机器人发出消息的本地缓存内容、过期时间与可选引用索引。
+    pub async fn update_outbound(
+        &self,
+        id: i32,
+        expires: i64,
+        content: &Value,
+        reference: Option<&str>,
+    ) -> Result<(), Error> {
+        let reference = reference
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        let mut value = content.clone();
+        let Value::Object(object) = &mut value else {
+            return Err(Error::InvalidContent);
+        };
+        object.insert("message_id".into(), Value::from(id));
+        let serialized = serde_json::to_string(&value).map_err(database)?;
+        self.call(move |connection| {
+            let updated = connection
+                .execute(
+                    "UPDATE message SET content=?1, expires=?2, reference=COALESCE(?3, reference) \
+                     WHERE id=?4 AND inbound=0",
+                    params![serialized, expires, reference, id],
+                )
+                .map_err(database)?;
+            if updated == 0 {
+                return Err(Error::MessageNotCached);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// 查询缓存的消息事件 JSON。
     pub async fn message(&self, id: i32, now: i64) -> Result<Option<Value>, Error> {
         self.call(move |connection| {
@@ -1137,13 +1172,20 @@ impl Store {
                 .optional()
                 .map_err(database)?;
             let openid = openid.ok_or(Error::UnknownTarget)?;
+            let passive_cutoff = now.saturating_sub(conversation.passive_window());
             let selected: Option<(i32, String, i64)> = match reply {
                 Some(id) => transaction
                     .query_row(
                         "SELECT id, official_id, next_seq FROM message \
                          WHERE id=?1 AND scope=?2 AND target=?3 AND inbound=1 \
-                         AND expires>?4 AND created<=?4+30",
-                        params![id, conversation.scope(), conversation.target(), now],
+                         AND expires>?4 AND created>?5 AND created<=?4+30",
+                        params![
+                            id,
+                            conversation.scope(),
+                            conversation.target(),
+                            now,
+                            passive_cutoff
+                        ],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()
@@ -1152,9 +1194,14 @@ impl Store {
                     .query_row(
                         "SELECT id, official_id, next_seq FROM message \
                          WHERE scope=?1 AND target=?2 AND inbound=1 \
-                         AND expires>?3 AND created<=?3+30 \
+                         AND expires>?3 AND created>?4 AND created<=?3+30 \
                          ORDER BY created DESC, id DESC LIMIT 1",
-                        params![conversation.scope(), conversation.target(), now],
+                        params![
+                            conversation.scope(),
+                            conversation.target(),
+                            now,
+                            passive_cutoff
+                        ],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()

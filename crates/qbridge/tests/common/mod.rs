@@ -163,6 +163,16 @@ impl Service {
             Arc::new(AtomicBool::new(true)),
         )
     }
+
+    pub fn bridge_with_cache(&self, store: Store, cache: qbridge::bridge::CachePolicy) -> Bridge {
+        Bridge::with_cache(
+            Arc::new(self.client()),
+            store,
+            10_000,
+            Arc::new(AtomicBool::new(true)),
+            cache,
+        )
+    }
 }
 
 pub fn memory_store() -> Store {

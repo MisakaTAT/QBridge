@@ -1,6 +1,6 @@
 use qbridge::config::{Config, Error, IntentName, MessageFormatConfig, QqSource};
 use qbridge_ob11::MessageFormat;
-use qbridge_qq::Intents;
+use qbridge_qq::{Intents, ShardConfig};
 
 const SAMPLE: &str = r#"
 self_id = 10000
@@ -87,10 +87,16 @@ secret = "s"
     let resolved = config.resolve().unwrap();
     assert_eq!(resolved.qq.source, QqSource::Gateway);
     assert_eq!(resolved.qq.intents, Intents::default());
+    assert_eq!(resolved.qq.shards, ShardConfig::Auto);
     assert_eq!(
         resolved.storage_path.to_str().unwrap(),
         "data/qbridge.sqlite"
     );
+    assert_eq!(resolved.cache.inbound_ttl_secs, 3600);
+    assert_eq!(resolved.cache.sent_ttl_secs, 3600);
+    assert_eq!(resolved.cache.profile_ttl_secs, 600);
+    assert_eq!(resolved.cache.stream_ttl_secs, 300);
+    assert_eq!(resolved.cache.cleanup_interval.as_secs(), 60);
     assert_eq!(resolved.message_format, MessageFormat::Array);
     assert_eq!(resolved.heartbeat_ms, 15_000);
     assert!(resolved.http_bind.is_none());
@@ -389,4 +395,70 @@ bits = 64
         .resolve(),
         Err(Error::Invalid(message)) if message.contains("identity.bits")
     ));
+}
+
+#[test]
+fn parses_and_validates_gateway_shards_and_cache_policy() {
+    let count = Config::parse(
+        r#"
+self_id = 1
+
+[forward_ws]
+
+[qq]
+app_id = "1"
+secret = "s"
+shards = 4
+
+[cache]
+inbound_ttl_secs = 7200
+sent_ttl_secs = 1800
+profile_ttl_secs = 1200
+stream_ttl_secs = 120
+cleanup_interval_secs = 30
+"#,
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    assert_eq!(count.qq.shards, ShardConfig::Count(4));
+    assert_eq!(count.cache.inbound_ttl_secs, 7200);
+    assert_eq!(count.cache.sent_ttl_secs, 1800);
+    assert_eq!(count.cache.profile_ttl_secs, 1200);
+    assert_eq!(count.cache.stream_ttl_secs, 120);
+    assert_eq!(count.cache.cleanup_interval.as_secs(), 30);
+
+    let single = Config::parse(
+        r#"
+self_id = 1
+
+[forward_ws]
+
+[qq]
+app_id = "1"
+secret = "s"
+shards = [2, 4]
+"#,
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    assert_eq!(single.qq.shards, ShardConfig::Single { id: 2, count: 4 });
+
+    for invalid in [
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\nshards = 0\n",
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\nshards = [4, 4]\n",
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\nshards = [0, 0]\n",
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\n[cache]\nsent_ttl_secs = 0\n",
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\n[cache]\nstream_ttl_secs = -1\n",
+        "self_id = 1\n[forward_ws]\n[qq]\napp_id = \"1\"\nsecret = \"s\"\n[cache]\ncleanup_interval_secs = 0\n",
+    ] {
+        assert!(
+            matches!(
+                Config::parse(invalid).unwrap().resolve(),
+                Err(Error::Invalid(_))
+            ),
+            "expected invalid config for:\n{invalid}"
+        );
+    }
 }

@@ -1,7 +1,7 @@
 //! 数据库结构与内容写入辅助。
 
 use super::Error;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::Value;
 
 fn database(error: impl std::fmt::Display) -> Error {
@@ -75,14 +75,38 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<(), Error> {
              CREATE INDEX message_expiry ON message(expires);
              CREATE INDEX message_reply ON message(scope, target, inbound, created DESC, id DESC);
              CREATE TABLE gateway_session (
-                single INTEGER PRIMARY KEY CHECK(single=1),
+                shard_id INTEGER PRIMARY KEY CHECK(shard_id>=0),
                 session_id TEXT NOT NULL,
                 seq INTEGER NOT NULL,
-                intents INTEGER NOT NULL DEFAULT 0
+                intents INTEGER NOT NULL DEFAULT 0,
+                shard_count INTEGER NOT NULL DEFAULT 1
              );
-             PRAGMA user_version=3;",
+             PRAGMA user_version=4;",
         )
         .map_err(database)
+}
+
+pub(super) fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), Error> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(database)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE gateway_session_v4 (
+                shard_id INTEGER PRIMARY KEY CHECK(shard_id>=0),
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                intents INTEGER NOT NULL DEFAULT 0,
+                shard_count INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO gateway_session_v4(shard_id, session_id, seq, intents, shard_count)
+             SELECT 0, session_id, seq, intents, 1 FROM gateway_session WHERE single=1;
+             DROP TABLE gateway_session;
+             ALTER TABLE gateway_session_v4 RENAME TO gateway_session;
+             PRAGMA user_version=4;",
+        )
+        .map_err(database)?;
+    transaction.commit().map_err(database)
 }
 
 /// 把事件写入占位行，取得本地 ID 后回填 `message_id`。

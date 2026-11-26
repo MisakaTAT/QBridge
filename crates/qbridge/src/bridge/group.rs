@@ -43,7 +43,7 @@ pub async fn member(bridge: &Bridge, request: GetGroupMemberInfo) -> Result<Valu
             info.username.as_deref().unwrap_or_default(),
             "",
             "",
-            600,
+            bridge.cache.profile_ttl_secs,
             crate::bridge::unix_now(),
         )
         .await?;
@@ -96,7 +96,11 @@ pub async fn members(bridge: &Bridge, request: GetGroupMemberList) -> Result<Val
         .collect::<Vec<_>>();
     bridge
         .store
-        .save_profiles(&profiles, 600, crate::bridge::unix_now())
+        .save_profiles(
+            &profiles,
+            bridge.cache.profile_ttl_secs,
+            crate::bridge::unix_now(),
+        )
         .await?;
     let mut members = Vec::with_capacity(raw.len());
     for member in raw {

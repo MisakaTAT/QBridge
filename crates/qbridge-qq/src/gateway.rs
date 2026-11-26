@@ -1,6 +1,6 @@
 //! QQ Gateway WebSocket 事件源。
 //!
-//! 负责连接发现、Identify/Resume、心跳、按 `s` 去重、断线指数退避重连，
+//! 负责 `/gateway/bot` 连接发现、多 Shard 调度、Identify/Resume、心跳、按 `s` 去重、断线指数退避重连，
 //! 并把会话通过 [`SessionStore`] 交给上层持久化。对外只暴露 `Stream`。
 
 use crate::{
@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{
     sync::mpsc,
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, timeout},
 };
 use tokio_tungstenite::tungstenite::{Message, protocol::WebSocketConfig};
@@ -32,12 +32,32 @@ use url::Url;
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_IDENTIFY_DELAY: Duration = Duration::from_secs(5);
 
 mod checkpoint;
 use checkpoint::CheckpointWriter;
 pub use checkpoint::GatewayAcknowledgement;
 
 type DispatchItem = (Envelope, Option<GatewayAcknowledgement>);
+
+/// 单个 Gateway 分片标识。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Shard {
+    pub id: u32,
+    pub count: u32,
+}
+
+/// Gateway 分片策略。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShardConfig {
+    /// 启动时通过 `/gateway/bot` 自动采用平台推荐分片数（接口不可用时退回单分片）。
+    #[default]
+    Auto,
+    /// 指定总分片数，当前进程运行全部 `[0..count)` 分片。
+    Count(u32),
+    /// 仅运行指定分片 `[id, count]`，适用于多进程外部编排。
+    Single { id: u32, count: u32 },
+}
 
 /// 可持久化的 Gateway 会话。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,14 +66,16 @@ pub struct Session {
     pub seq: u64,
     /// 建立该会话时使用的 intents 位掩码；变化后必须重新 Identify。
     pub intents: u64,
+    /// 建立该会话时的分片总数；变化后必须重新 Identify。
+    pub shard_count: u32,
 }
 
 /// 上层提供会话持久化；SDK 不依赖具体数据库。
 #[async_trait]
 pub trait SessionStore: Send + Sync + 'static {
-    async fn load(&self) -> Result<Option<Session>, Error>;
-    async fn save(&self, session: &Session) -> Result<(), Error>;
-    async fn clear(&self) -> Result<(), Error>;
+    async fn load(&self, shard_id: u32) -> Result<Option<Session>, Error>;
+    async fn save(&self, shard_id: u32, session: &Session) -> Result<(), Error>;
+    async fn clear(&self, shard_id: u32) -> Result<(), Error>;
 }
 
 /// 不持久化会话的实现，用于不需要 Resume 的调用方。
@@ -61,15 +83,15 @@ pub struct NoopSessionStore;
 
 #[async_trait]
 impl SessionStore for NoopSessionStore {
-    async fn load(&self) -> Result<Option<Session>, Error> {
+    async fn load(&self, _shard_id: u32) -> Result<Option<Session>, Error> {
         Ok(None)
     }
 
-    async fn save(&self, _session: &Session) -> Result<(), Error> {
+    async fn save(&self, _shard_id: u32, _session: &Session) -> Result<(), Error> {
         Ok(())
     }
 
-    async fn clear(&self) -> Result<(), Error> {
+    async fn clear(&self, _shard_id: u32) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -77,9 +99,11 @@ impl SessionStore for NoopSessionStore {
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub intents: Intents,
+    pub shard: ShardConfig,
     pub reconnect_initial: Duration,
     pub reconnect_max: Duration,
     pub ready_timeout: Duration,
+    pub identify_delay: Duration,
     pub event_capacity: usize,
 }
 
@@ -87,9 +111,11 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             intents: Intents::default(),
+            shard: ShardConfig::Auto,
             reconnect_initial: Duration::from_secs(1),
             reconnect_max: Duration::from_secs(30),
             ready_timeout: Duration::from_secs(10),
+            identify_delay: DEFAULT_IDENTIFY_DELAY,
             event_capacity: 256,
         }
     }
@@ -163,7 +189,7 @@ pub fn connect(
     let task = tokio::spawn(run(
         client,
         config,
-        Arc::new(CheckpointWriter::new(store)),
+        store,
         cancel.clone(),
         sender,
         online.clone(),
@@ -186,29 +212,282 @@ fn reconnect(reason: &'static str, ready: bool) -> Failure {
     Failure::Reconnect { reason, ready }
 }
 
+struct DiscoveredGateway {
+    url: Url,
+    shards: u32,
+    max_concurrency: u32,
+}
+
+async fn discover_gateway(client: &Client) -> Result<DiscoveredGateway, Failure> {
+    match client.gateway_bot().await {
+        Ok(bot) => {
+            let url = validate_gateway_url(&bot.url).map_err(Failure::Fatal)?;
+            let max_concurrency = bot
+                .session_start_limit
+                .as_ref()
+                .map(|limit| limit.max_concurrency)
+                .unwrap_or(1)
+                .max(1);
+            Ok(DiscoveredGateway {
+                url,
+                shards: bot.shards.max(1),
+                max_concurrency,
+            })
+        }
+        Err(Error::Api {
+            http_status: 404, ..
+        }) => {
+            let raw_url = client
+                .gateway_url()
+                .await
+                .map_err(|error| client_failure(error, "gateway discovery failed"))?;
+            let url = validate_gateway_url(&raw_url).map_err(Failure::Fatal)?;
+            Ok(DiscoveredGateway {
+                url,
+                shards: 1,
+                max_concurrency: 1,
+            })
+        }
+        Err(error) => Err(client_failure(error, "gateway discovery failed")),
+    }
+}
+
+fn resolve_shards(setting: ShardConfig, recommended: u32) -> Result<Vec<Shard>, Error> {
+    match setting {
+        ShardConfig::Auto => {
+            let count = recommended.max(1);
+            Ok((0..count).map(|id| Shard { id, count }).collect())
+        }
+        ShardConfig::Count(0) => Err(Error::decode("gateway shard count must be positive")),
+        ShardConfig::Count(count) => Ok((0..count).map(|id| Shard { id, count }).collect()),
+        ShardConfig::Single { id, count } => {
+            if count == 0 || id >= count {
+                return Err(Error::decode(
+                    "invalid gateway shard specification: shard id must be smaller than shard count",
+                ));
+            }
+            Ok(vec![Shard { id, count }])
+        }
+    }
+}
+
+struct IdentifyWindow {
+    used: usize,
+    until: Instant,
+}
+
+struct IdentifyLimiter {
+    max_concurrency: usize,
+    delay: Duration,
+    window: tokio::sync::Mutex<IdentifyWindow>,
+}
+
+impl IdentifyLimiter {
+    fn new(max_concurrency: u32, delay: Duration) -> Self {
+        Self {
+            max_concurrency: usize::try_from(max_concurrency.max(1)).unwrap_or(1),
+            delay,
+            window: tokio::sync::Mutex::new(IdentifyWindow {
+                used: 0,
+                until: Instant::now(),
+            }),
+        }
+    }
+
+    async fn acquire(&self, cancel: &CancellationToken) -> bool {
+        if self.delay.is_zero() {
+            return !cancel.is_cancelled();
+        }
+        let mut window = self.window.lock().await;
+        let now = Instant::now();
+        if window.used == 0 || now >= window.until {
+            window.used = 1;
+            window.until = now + self.delay;
+            return true;
+        }
+        if window.used < self.max_concurrency {
+            window.used += 1;
+            return true;
+        }
+        let wait = window.until.saturating_duration_since(now);
+        tokio::select! {
+            _ = cancel.cancelled() => false,
+            _ = tokio::time::sleep(wait) => {
+                window.used = 1;
+                window.until = Instant::now() + self.delay;
+                true
+            }
+        }
+    }
+}
+
+struct OnlineTracker {
+    online: Arc<AtomicBool>,
+    connected: std::sync::Mutex<usize>,
+}
+
+impl OnlineTracker {
+    fn new(online: Arc<AtomicBool>) -> Self {
+        Self {
+            online,
+            connected: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn enter(self: &Arc<Self>) -> OnlineGuard {
+        if let Ok(mut connected) = self.connected.lock() {
+            *connected += 1;
+            self.online.store(true, Ordering::Release);
+        }
+        OnlineGuard(self.clone())
+    }
+
+    fn leave(&self) {
+        if let Ok(mut connected) = self.connected.lock() {
+            *connected = connected.saturating_sub(1);
+            self.online.store(*connected > 0, Ordering::Release);
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut connected) = self.connected.lock() {
+            *connected = 0;
+        }
+        self.online.store(false, Ordering::Release);
+    }
+}
+
+struct OnlineGuard(Arc<OnlineTracker>);
+
+impl Drop for OnlineGuard {
+    fn drop(&mut self) {
+        self.0.leave();
+    }
+}
+
 async fn run(
     client: Arc<Client>,
     config: GatewayConfig,
-    checkpoint: Arc<CheckpointWriter>,
+    store: Arc<dyn SessionStore>,
     cancel: CancellationToken,
     out: mpsc::Sender<DispatchItem>,
     online: Arc<AtomicBool>,
 ) {
-    let mut session = match checkpoint.store.load().await {
-        Ok(Some(session)) if session.intents == config.intents.bits() => {
+    if let Err(error) = resolve_shards(config.shard, 1) {
+        tracing::warn!(
+            reason = %redact::text(&error.to_string()),
+            "QQ Gateway terminated by invalid shard configuration"
+        );
+        online.store(false, Ordering::Release);
+        return;
+    }
+    let mut backoff = config.reconnect_initial;
+    let discovered = loop {
+        if cancel.is_cancelled() {
+            online.store(false, Ordering::Release);
+            return;
+        }
+        match discover_gateway(&client).await {
+            Ok(discovered) => break discovered,
+            Err(Failure::Fatal(error)) => {
+                tracing::warn!(
+                    reason = %redact::text(&error.to_string()),
+                    "QQ Gateway terminated by a non-recoverable error"
+                );
+                online.store(false, Ordering::Release);
+                return;
+            }
+            Err(Failure::Reconnect { reason, .. }) => {
+                tracing::warn!(reason, "QQ Gateway discovery retrying");
+                sleep_or_cancel(backoff, &cancel).await;
+                backoff = (backoff * 2).min(config.reconnect_max);
+            }
+        }
+    };
+    let shards = match resolve_shards(config.shard, discovered.shards) {
+        Ok(shards) => shards,
+        Err(error) => {
+            tracing::warn!(
+                reason = %redact::text(&error.to_string()),
+                "QQ Gateway terminated by invalid shard configuration"
+            );
+            online.store(false, Ordering::Release);
+            return;
+        }
+    };
+    let tracker = Arc::new(OnlineTracker::new(online));
+    let limiter = Arc::new(IdentifyLimiter::new(
+        discovered.max_concurrency,
+        config.identify_delay,
+    ));
+    let mut tasks = JoinSet::new();
+    for shard in shards {
+        let client = client.clone();
+        let config = config.clone();
+        let checkpoint = Arc::new(CheckpointWriter::new(store.clone(), shard));
+        let cancel = cancel.clone();
+        let out = out.clone();
+        let tracker = tracker.clone();
+        let limiter = limiter.clone();
+        let initial_url = Some(discovered.url.clone());
+        tasks.spawn(async move {
+            run_shard(
+                client,
+                config,
+                shard,
+                initial_url,
+                checkpoint,
+                cancel,
+                out,
+                tracker,
+                limiter,
+            )
+            .await
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        if matches!(result, Ok(true) | Err(_)) {
+            cancel.cancel();
+        }
+    }
+    tracker.clear();
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_shard(
+    client: Arc<Client>,
+    config: GatewayConfig,
+    shard: Shard,
+    mut initial_url: Option<Url>,
+    checkpoint: Arc<CheckpointWriter>,
+    cancel: CancellationToken,
+    out: mpsc::Sender<DispatchItem>,
+    tracker: Arc<OnlineTracker>,
+    limiter: Arc<IdentifyLimiter>,
+) -> bool {
+    let mut session = match checkpoint.store.load(shard.id).await {
+        Ok(Some(session))
+            if session.intents == config.intents.bits() && session.shard_count == shard.count =>
+        {
             checkpoint
                 .activate(&session.session_id, Some(session.seq))
                 .await;
             Some(session)
         }
         Ok(Some(_)) => {
-            tracing::info!("persisted Gateway session intents changed; starting a new session");
+            tracing::info!(
+                shard_id = shard.id,
+                shard_count = shard.count,
+                "persisted Gateway session intents or shard count changed; starting a new session"
+            );
             checkpoint.clear().await;
             None
         }
         Ok(None) => None,
         Err(error) => {
             tracing::warn!(
+                shard_id = shard.id,
+                shard_count = shard.count,
                 reason = %redact::text(&error.to_string()),
                 "cannot load persisted Gateway session; starting without Resume"
             );
@@ -216,6 +495,7 @@ async fn run(
         }
     };
     let mut backoff = config.reconnect_initial;
+    let mut fatal = false;
     loop {
         if cancel.is_cancelled() {
             break;
@@ -223,10 +503,13 @@ async fn run(
         match run_once(
             &client,
             &config,
+            shard,
+            initial_url.take(),
             &checkpoint,
             &cancel,
             &out,
-            &online,
+            &tracker,
+            &limiter,
             &mut session,
         )
         .await
@@ -243,14 +526,22 @@ async fn run(
             }
             Err(Failure::Fatal(error)) => {
                 tracing::warn!(
+                    shard_id = shard.id,
+                    shard_count = shard.count,
                     reason = %redact::text(&error.to_string()),
                     "QQ Gateway terminated by a non-recoverable error"
                 );
+                fatal = true;
                 break;
             }
             Err(Failure::Reconnect { reason, ready }) => {
-                online.store(false, Ordering::Release);
-                tracing::warn!(reason, ready, "QQ Gateway reconnecting");
+                tracing::warn!(
+                    shard_id = shard.id,
+                    shard_count = shard.count,
+                    reason,
+                    ready,
+                    "QQ Gateway reconnecting"
+                );
                 if ready {
                     backoff = config.reconnect_initial;
                 }
@@ -259,7 +550,7 @@ async fn run(
             }
         }
     }
-    online.store(false, Ordering::Release);
+    fatal
 }
 
 async fn sleep_or_cancel(duration: Duration, cancel: &CancellationToken) {
@@ -269,41 +560,31 @@ async fn sleep_or_cancel(duration: Duration, cancel: &CancellationToken) {
     }
 }
 
-struct OnlineGuard(Arc<AtomicBool>);
-
-impl OnlineGuard {
-    fn new(online: Arc<AtomicBool>) -> Self {
-        online.store(true, Ordering::Release);
-        Self(online)
-    }
-}
-
-impl Drop for OnlineGuard {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
-    }
-}
-
 enum Control {
     Text(String),
     Pong(Vec<u8>),
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     client: &Client,
     config: &GatewayConfig,
+    shard: Shard,
+    initial_url: Option<Url>,
     checkpoint: &Arc<CheckpointWriter>,
     cancel: &CancellationToken,
     out: &mpsc::Sender<DispatchItem>,
-    online: &Arc<AtomicBool>,
+    tracker: &Arc<OnlineTracker>,
+    limiter: &IdentifyLimiter,
     session: &mut Option<Session>,
 ) -> Result<bool, Failure> {
-    let url = client
-        .gateway_url()
-        .await
-        .map_err(|error| client_failure(error, "gateway discovery failed"))?;
-    let url = validate_gateway_url(&url).map_err(Failure::Fatal)?;
+    let url = match initial_url {
+        Some(url) => url,
+        None => discover_gateway(client).await?.url,
+    };
     tracing::info!(
+        shard_id = shard.id,
+        shard_count = shard.count,
         endpoint = %url.origin().ascii_serialization(),
         "QQ Gateway connecting"
     );
@@ -317,8 +598,12 @@ async fn run_once(
     .await
     .map_err(|_| reconnect("gateway connect timed out", false))?
     .map_err(|_| reconnect("gateway handshake failed", false))?;
-    tracing::info!("QQ Gateway WebSocket connected");
-    let _guard = OnlineGuard::new(online.clone());
+    tracing::info!(
+        shard_id = shard.id,
+        shard_count = shard.count,
+        "QQ Gateway WebSocket connected"
+    );
+    let _guard = tracker.enter();
 
     let (mut sink, mut stream) = socket.split();
     let (control_tx, mut control_rx) = mpsc::channel::<Control>(8);
@@ -406,14 +691,19 @@ async fn run_once(
                                             "seq": session.seq,
                                         }
                                     }),
-                                    None => json!({
-                                        "op": 2,
-                                        "d": {
-                                            "token": format!("QQBot {token}"),
-                                            "intents": config.intents.bits(),
-                                            "shard": [0, 1],
+                                    None => {
+                                        if !limiter.acquire(cancel).await {
+                                            break Ok(ready);
                                         }
-                                    }),
+                                        json!({
+                                            "op": 2,
+                                            "d": {
+                                                "token": format!("QQBot {token}"),
+                                                "intents": config.intents.bits(),
+                                                "shard": [shard.id, shard.count],
+                                            }
+                                        })
+                                    }
                                 };
                                 if control_tx
                                     .send(Control::Text(auth.to_string()))
@@ -479,14 +769,23 @@ async fn run_once(
                                         session_id: session_id.to_owned(),
                                         seq: seq.unwrap_or(0),
                                         intents: config.intents.bits(),
+                                        shard_count: shard.count,
                                     };
                                     checkpoint.activate(session_id, None).await;
                                     *session = Some(new_session);
                                     ready = true;
-                                    tracing::info!("QQ Gateway ready");
+                                    tracing::info!(
+                                        shard_id = shard.id,
+                                        shard_count = shard.count,
+                                        "QQ Gateway ready"
+                                    );
                                 } else if event_type == "RESUMED" {
                                     ready = true;
-                                    tracing::info!("QQ Gateway session resumed");
+                                    tracing::info!(
+                                        shard_id = shard.id,
+                                        shard_count = shard.count,
+                                        "QQ Gateway session resumed"
+                                    );
                                 }
                                 if let Some(seq) = seq {
                                     last_seq = seq;
@@ -525,7 +824,12 @@ async fn run_once(
                     Message::Close(frame) => {
                         let code = frame.as_ref().map(|frame| u16::from(frame.code));
                         if let Some(code) = code {
-                            tracing::warn!(close_code = code, "QQ Gateway closed by peer");
+                            tracing::warn!(
+                                shard_id = shard.id,
+                                shard_count = shard.count,
+                                close_code = code,
+                                "QQ Gateway closed by peer"
+                            );
                             if fatal_close(code) {
                                 break Err(Failure::Fatal(Error::auth(format!(
                                     "gateway rejected authentication, intents or sharding (close code {code})"

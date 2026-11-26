@@ -48,7 +48,7 @@ flowchart LR
 - **稳定数字 ID**：QQ OpenID 不会直接暴露给下游；同一个 OpenID 在私聊和群聊中复用同一个实体 ID。
 - **完整消息能力**：文本、图片、语音、视频、文件、Markdown、键盘、合并转发和主动消息。
 - **大文件支持**：本地媒体按需读取，超过 5 MiB 自动走 QQ 分片上传。
-- **持久化状态**：SQLite 保存身份、消息缓存、Gateway 会话和 profile 缓存，支持 Resume。
+- **持久化状态与多分片**：SQLite 保存身份、消息缓存、按分片隔离的 Gateway 会话和 profile 缓存；Gateway 通过 `/gateway/bot` 支持自动分片、Resume 与可配置缓存 TTL。
 - **明确的失败语义**：QQ 不提供的能力返回明确错误，不伪造成功或空结果。
 
 ## 能力
@@ -275,7 +275,7 @@ HTTP API 的动作参数支持 JSON、query 和表单；HTTP POST 上报事件�
 
 - **被动回复**：群聊每条入站消息最多 5 次，单聊最多 4 次；QBridge 自动维护 `msg_seq`。
 - **主动消息**：消息参数带 `active: true` 时跳过被动上下文。
-- **消息缓存**：入站和机器人发出的消息都会写入 SQLite，供 `get_msg`、`get_image`、引用和撤回使用。
+- **消息缓存**：入站和机器人发出的消息都会写入 SQLite，供 `get_msg`、`get_image`、引用和撤回使用；TTL 与清理间隔可在 `[cache]` 中配置，入站消息缓存时长与 QQ 被动回复窗口解耦。
 - **身份映射**：QQ OpenID 只存在数据库中；同一个 OpenID 在私聊和群聊中复用同一个实体 ID。
 - **profile 缓存**：好友列表和群成员列表会读取昵称/名片缓存，减少重复接口调用。
 - **大文件**：本地媒体流式读取，按 QQ `upload_prepare`/分片流程上传。
