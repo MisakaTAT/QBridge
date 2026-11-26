@@ -234,7 +234,7 @@ async fn next_event(events: &mut Option<broadcast::Receiver<Arc<str>>>) -> Event
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::{Handler, HubOptions};
+    use crate::server::{ActionOutcome, CallContext, Handler, HubOptions};
     use async_trait::async_trait;
     use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
     use futures_util::{SinkExt, StreamExt};
@@ -252,8 +252,12 @@ mod tests {
             10_000
         }
 
-        async fn call(&self, _call: Call) -> Result<Value, ActionError> {
-            Ok(json!({"ok": true}))
+        async fn call(
+            &self,
+            _call: Call,
+            _context: CallContext,
+        ) -> Result<ActionOutcome, ActionError> {
+            Ok(ActionOutcome::Ok(json!({"ok": true})))
         }
     }
 

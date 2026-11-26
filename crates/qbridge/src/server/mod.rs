@@ -13,6 +13,7 @@ use qbridge_ob11::{
     event::{BotStatus, LifecycleType, MetaEvent},
     quick_operation,
 };
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     sync::{
@@ -28,10 +29,43 @@ use url::Url;
 
 const ASYNC_CONCURRENCY: usize = 16;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActionOutcome {
+    Ok(Value),
+    Accepted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct HttpPostDeliveryStats {
+    pub queued: usize,
+    pub queue_rejected: u64,
+    pub retry_exhausted: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct EventDeliveryStats {
+    pub http_post: HttpPostDeliveryStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CallContext {
+    event_delivery: EventDeliveryStats,
+}
+
+impl CallContext {
+    pub fn new(event_delivery: EventDeliveryStats) -> Self {
+        Self { event_delivery }
+    }
+
+    pub fn event_delivery(&self) -> EventDeliveryStats {
+        self.event_delivery
+    }
+}
+
 #[async_trait]
 pub trait Handler: Send + Sync + 'static {
     fn self_id(&self) -> i64;
-    async fn call(&self, call: Call) -> Result<Value, ActionError>;
+    async fn call(&self, call: Call, context: CallContext) -> Result<ActionOutcome, ActionError>;
 }
 
 #[derive(Debug, Clone)]
@@ -220,19 +254,19 @@ impl Hub {
         }
     }
 
-    fn delivery_status(&self) -> Value {
+    pub fn delivery_stats(&self) -> EventDeliveryStats {
         let queued: usize = self
             .post_targets
             .iter()
             .map(|queue| queue.max_capacity().saturating_sub(queue.capacity()))
             .sum();
-        serde_json::json!({
-            "http_post": {
-                "queued": queued,
-                "queue_rejected": self.post_queue_rejected.load(Ordering::Relaxed),
-                "retry_exhausted": self.post_retry_exhausted.load(Ordering::Relaxed),
-            }
-        })
+        EventDeliveryStats {
+            http_post: HttpPostDeliveryStats {
+                queued,
+                queue_rejected: self.post_queue_rejected.load(Ordering::Relaxed),
+                retry_exhausted: self.post_retry_exhausted.load(Ordering::Relaxed),
+            },
+        }
     }
 
     pub fn publish_lifecycle(&self, sub_type: LifecycleType) {
@@ -307,29 +341,28 @@ impl Hub {
         started: Instant,
     ) -> Response {
         let span_for_log = span.clone();
-        let restart = matches!(action, Action::SetRestart(_));
-        let status = matches!(action, Action::GetStatus);
         async move {
-            let mut result = self
+            let context = CallContext::new(self.delivery_stats());
+            let result = self
                 .handler
-                .call(Call {
-                    action,
-                    mode: Mode::Sync,
-                })
+                .call(
+                    Call {
+                        action,
+                        mode: Mode::Sync,
+                    },
+                    context,
+                )
                 .await;
-            if status && let Ok(Value::Object(data)) = &mut result {
-                data.insert("event_delivery".into(), self.delivery_status());
-            }
             let response = match &result {
-                Ok(_) if restart => Response::accepted(),
-                Ok(data) => Response::ok(data.clone()),
+                Ok(ActionOutcome::Ok(data)) => Response::ok(data.clone()),
+                Ok(ActionOutcome::Accepted) => Response::accepted(),
                 Err(error) => failure(error.clone()),
             };
             span.record("status", status_name(&response));
             span.record("retcode", response.retcode);
             span.record("elapsed_ms", started.elapsed().as_millis() as u64);
             match result {
-                Ok(_) => tracing::info!(retcode = 0, "OB11 action completed"),
+                Ok(_) => tracing::info!(retcode = response.retcode, "OB11 action completed"),
                 Err(error) => tracing::warn!(
                     retcode = error.retcode(),
                     reason = error.reason(),

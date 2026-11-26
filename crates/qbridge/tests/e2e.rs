@@ -401,6 +401,19 @@ rate_limit_ms = 10
     assert_eq!(removed["user_id"], member_id);
     assert!(removed["operator_id"].is_null());
 
+    let status: Value = http
+        .get(format!("{api_url}/get_status"))
+        .query(&[("access_token", "OB11TOKEN")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["retcode"], 0);
+    assert_eq!(status["data"]["online"], true);
+    assert!(status["data"]["event_delivery"]["http_post"]["queued"].is_u64());
+
     let restart: Value = http
         .post(format!("{api_url}/set_restart"))
         .query(&[("access_token", "OB11TOKEN")])

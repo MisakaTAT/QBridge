@@ -4,7 +4,7 @@ use crate::{
     bridge::Bridge,
     config::ResolvedConfig,
     error::ActionError,
-    server::{self, Handler, Hub, HubOptions, reverse::ReverseConfig},
+    server::{self, ActionOutcome, CallContext, Handler, Hub, HubOptions, reverse::ReverseConfig},
     store::Store,
 };
 use async_trait::async_trait;
@@ -91,15 +91,25 @@ impl Handler for AppHandler {
         self.bridge.self_id()
     }
 
-    async fn call(&self, call: Call) -> Result<Value, ActionError> {
+    async fn call(&self, call: Call, context: CallContext) -> Result<ActionOutcome, ActionError> {
         match call.action {
             Action::SetRestart(request) => {
                 self.restart
                     .try_send(request.delay)
                     .map_err(|_| ActionError::ShuttingDown)?;
-                Ok(Value::Null)
+                Ok(ActionOutcome::Accepted)
             }
-            action => self.bridge.execute(action).await,
+            Action::GetStatus => {
+                let mut data = self.bridge.execute(Action::GetStatus).await?;
+                if let Value::Object(object) = &mut data {
+                    object.insert(
+                        "event_delivery".into(),
+                        serde_json::to_value(context.event_delivery()).unwrap_or(Value::Null),
+                    );
+                }
+                Ok(ActionOutcome::Ok(data))
+            }
+            action => self.bridge.execute(action).await.map(ActionOutcome::Ok),
         }
     }
 }

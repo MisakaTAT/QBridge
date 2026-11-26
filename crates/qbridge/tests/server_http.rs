@@ -341,6 +341,56 @@ async fn set_restart_is_acknowledged_as_async() {
 }
 
 #[tokio::test]
+async fn hub_delegates_action_outcomes_and_status_fields_to_handler() {
+    struct CustomHandler;
+
+    #[async_trait::async_trait]
+    impl qbridge::server::Handler for CustomHandler {
+        fn self_id(&self) -> i64 {
+            10_000
+        }
+
+        async fn call(
+            &self,
+            call: qbridge_ob11::Call,
+            _context: qbridge::server::CallContext,
+        ) -> Result<qbridge::server::ActionOutcome, qbridge::error::ActionError> {
+            match call.action {
+                qbridge_ob11::Action::GetLoginInfo => Ok(qbridge::server::ActionOutcome::Accepted),
+                qbridge_ob11::Action::GetStatus => {
+                    Ok(qbridge::server::ActionOutcome::Ok(json!({"custom": true})))
+                }
+                qbridge_ob11::Action::SetRestart(_) => Ok(qbridge::server::ActionOutcome::Ok(
+                    json!({"restarted": false}),
+                )),
+                _ => Ok(qbridge::server::ActionOutcome::Ok(Value::Null)),
+            }
+        }
+    }
+
+    let hub = Hub::new(Arc::new(CustomHandler), hub_options());
+
+    let accepted = hub
+        .dispatch(qbridge_ob11::Call::parse("get_login_info", Default::default()).unwrap())
+        .await;
+    assert_eq!(accepted.status, qbridge_ob11::Status::Async);
+    assert_eq!(accepted.retcode, 1);
+
+    let status = hub
+        .dispatch(qbridge_ob11::Call::parse("get_status", Default::default()).unwrap())
+        .await;
+    assert_eq!(status.status, qbridge_ob11::Status::Ok);
+    assert_eq!(status.data, json!({"custom": true}));
+
+    let restart = hub
+        .dispatch(qbridge_ob11::Call::parse("set_restart", Default::default()).unwrap())
+        .await;
+    assert_eq!(restart.status, qbridge_ob11::Status::Ok);
+    assert_eq!(restart.retcode, 0);
+    assert_eq!(restart.data, json!({"restarted": false}));
+}
+
+#[tokio::test]
 async fn websocket_api_role_does_not_receive_events() {
     let handler = Arc::new(StubHandler::new(10_000));
     let hub = Hub::new(handler, hub_options());

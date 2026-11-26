@@ -212,7 +212,7 @@ pub fn message_event(scope: &str, target: i64, text: &str, time: i64) -> Value {
 use async_trait::async_trait;
 use qbridge::{
     error::ActionError,
-    server::{Handler, Hub, HubOptions},
+    server::{ActionOutcome, CallContext, Handler, Hub, HubOptions},
 };
 use qbridge_ob11::{
     Action, Call, Event, EventKind,
@@ -268,7 +268,7 @@ impl Handler for StubHandler {
         self.self_id
     }
 
-    async fn call(&self, call: Call) -> Result<Value, ActionError> {
+    async fn call(&self, call: Call, context: CallContext) -> Result<ActionOutcome, ActionError> {
         let name = match &call.action {
             Action::SendMsg(_) => "send_msg",
             Action::GetLoginInfo => "get_login_info",
@@ -281,10 +281,15 @@ impl Handler for StubHandler {
             self.release.notified().await;
         }
         self.calls.lock().unwrap().push(name.into());
-        if matches!(call.action, Action::Extension { .. }) {
-            return Err(ActionError::UnknownAction);
+        match call.action {
+            Action::Extension { .. } => Err(ActionError::UnknownAction),
+            Action::SetRestart(_) => Ok(ActionOutcome::Accepted),
+            Action::GetStatus => Ok(ActionOutcome::Ok(json!({
+                "ok": true,
+                "event_delivery": context.event_delivery(),
+            }))),
+            _ => Ok(ActionOutcome::Ok(json!({"ok": true}))),
         }
-        Ok(json!({"ok": true}))
     }
 }
 
