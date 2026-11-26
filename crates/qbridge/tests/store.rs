@@ -414,61 +414,6 @@ async fn gateway_session_round_trips() {
 }
 
 #[tokio::test]
-async fn migrates_v3_gateway_session_to_v4() {
-    let path = temp_db();
-    {
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK(id=1), app_id TEXT NOT NULL);
-                 INSERT INTO meta(id, app_id) VALUES(1, 'app');
-                 CREATE TABLE gateway_session (
-                    single INTEGER PRIMARY KEY CHECK(single=1),
-                    session_id TEXT NOT NULL,
-                    seq INTEGER NOT NULL,
-                    intents INTEGER NOT NULL DEFAULT 0
-                 );
-                 INSERT INTO gateway_session(single, session_id, seq, intents) VALUES(1, 'LEGACY', 42, 999);
-                 PRAGMA user_version=3;",
-            )
-            .unwrap();
-    }
-    let store = Store::open(&path, "app").unwrap();
-    assert_eq!(
-        store.gateway_session(0).await.unwrap(),
-        Some(Session {
-            session_id: "LEGACY".into(),
-            seq: 42,
-            intents: 999,
-            shard_count: 1,
-        })
-    );
-    store
-        .save_gateway_session(
-            1,
-            &Session {
-                session_id: "SHARD-1".into(),
-                seq: 3,
-                intents: 999,
-                shard_count: 2,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        store.gateway_session(1).await.unwrap().unwrap().session_id,
-        "SHARD-1"
-    );
-    drop(store);
-    let connection = rusqlite::Connection::open(&path).unwrap();
-    let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 4);
-    let _ = std::fs::remove_dir_all(path.parent().unwrap());
-}
-
-#[tokio::test]
 async fn updates_outbound_content_expiry_and_reference() {
     let store = memory_store();
     let conversation = Conversation::Private(1);

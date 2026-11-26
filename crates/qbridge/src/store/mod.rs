@@ -22,8 +22,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const SCHEMA_VERSION: i64 = 4;
-
 /// 群聊被动回复窗口。
 pub const GROUP_PASSIVE_WINDOW: i64 = 300;
 /// 单聊被动回复窗口。
@@ -340,16 +338,7 @@ impl Store {
                 "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;",
             )
             .map_err(database)?;
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .map_err(database)?;
-        if version == 0 {
-            schema::initialize(&mut connection)?;
-        } else if version == 3 {
-            schema::migrate_v3_to_v4(&mut connection)?;
-        } else if version != SCHEMA_VERSION {
-            return Err(Error::SchemaVersion(version));
-        }
+        schema::prepare(&mut connection)?;
         let stored: Option<String> = connection
             .query_row("SELECT app_id FROM meta WHERE id=1", [], |row| row.get(0))
             .optional()

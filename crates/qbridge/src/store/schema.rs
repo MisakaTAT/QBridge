@@ -4,12 +4,29 @@ use super::Error;
 use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::Value;
 
+const SCHEMA_VERSION: i64 = 20261126;
+
 fn database(error: impl std::fmt::Display) -> Error {
     Error::Database(error.to_string())
 }
 
-pub(super) fn initialize(connection: &mut Connection) -> Result<(), Error> {
-    connection
+pub(super) fn prepare(connection: &mut Connection) -> Result<(), Error> {
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(database)?;
+    if version == 0 {
+        initialize(connection)?;
+    } else if version != SCHEMA_VERSION {
+        return Err(Error::SchemaVersion(version));
+    }
+    Ok(())
+}
+
+fn initialize(connection: &mut Connection) -> Result<(), Error> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(database)?;
+    transaction
         .execute_batch(
             "CREATE TABLE meta (
                 id INTEGER PRIMARY KEY CHECK(id=1),
@@ -80,31 +97,11 @@ pub(super) fn initialize(connection: &mut Connection) -> Result<(), Error> {
                 seq INTEGER NOT NULL,
                 intents INTEGER NOT NULL DEFAULT 0,
                 shard_count INTEGER NOT NULL DEFAULT 1
-             );
-             PRAGMA user_version=4;",
+             );",
         )
-        .map_err(database)
-}
-
-pub(super) fn migrate_v3_to_v4(connection: &mut Connection) -> Result<(), Error> {
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database)?;
     transaction
-        .execute_batch(
-            "CREATE TABLE gateway_session_v4 (
-                shard_id INTEGER PRIMARY KEY CHECK(shard_id>=0),
-                session_id TEXT NOT NULL,
-                seq INTEGER NOT NULL,
-                intents INTEGER NOT NULL DEFAULT 0,
-                shard_count INTEGER NOT NULL DEFAULT 1
-             );
-             INSERT INTO gateway_session_v4(shard_id, session_id, seq, intents, shard_count)
-             SELECT 0, session_id, seq, intents, 1 FROM gateway_session WHERE single=1;
-             DROP TABLE gateway_session;
-             ALTER TABLE gateway_session_v4 RENAME TO gateway_session;
-             PRAGMA user_version=4;",
-        )
+        .execute_batch(&format!("PRAGMA user_version={SCHEMA_VERSION};"))
         .map_err(database)?;
     transaction.commit().map_err(database)
 }
@@ -172,4 +169,34 @@ pub(super) fn image_in(event: &Value, file: &str) -> Option<String> {
 
 fn is_http(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initializes_fresh_database_at_current_schema_version() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        prepare(&mut connection).unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        prepare(&mut connection).unwrap();
+    }
+
+    #[test]
+    fn rejects_mismatched_schema_versions() {
+        for unsupported in [1_i64, 3, 4, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection
+                .execute_batch(&format!("PRAGMA user_version={unsupported};"))
+                .unwrap();
+            assert!(matches!(
+                prepare(&mut connection),
+                Err(Error::SchemaVersion(version)) if version == unsupported
+            ));
+        }
+    }
 }
