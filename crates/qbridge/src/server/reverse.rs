@@ -85,6 +85,12 @@ async fn connect(
         "User-Agent",
         HeaderValue::from_static(concat!("qbridge/", env!("CARGO_PKG_VERSION"))),
     );
+    if let Some(token) = hub.access_token() {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| "invalid access_token header")?;
+        authorization.set_sensitive(true);
+        request.headers_mut().insert("Authorization", authorization);
+    }
     let mut socket_config = WebSocketConfig::default();
     socket_config.max_message_size = Some(hub.max_ws_bytes());
     socket_config.max_frame_size = Some(hub.max_ws_bytes());

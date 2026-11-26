@@ -258,6 +258,7 @@ async fn reverse_websocket_connects_with_headers_and_handles_both_directions() {
     let headers = state.headers.lock().unwrap().clone().unwrap();
     assert_eq!(headers.get("x-self-id").unwrap(), "10000");
     assert_eq!(headers.get("x-client-role").unwrap(), "Universal");
+    assert!(headers.get("authorization").is_none());
 
     state
         .commands
@@ -292,6 +293,49 @@ async fn reverse_websocket_connects_with_headers_and_handles_both_directions() {
             Duration::from_secs(2)
         )
         .await
+    );
+    hub.shutdown();
+    reverse.abort();
+    task.abort();
+}
+
+#[tokio::test]
+async fn reverse_websocket_sends_bearer_access_token_when_configured() {
+    let state = ReverseState {
+        frames: Arc::new(Mutex::new(Vec::new())),
+        headers: Arc::new(Mutex::new(None)),
+        commands: broadcast::channel(8).0,
+    };
+    let app = Router::new()
+        .route("/ws", get(reverse_handler))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let handler = Arc::new(StubHandler::new(10_000));
+    let mut options = hub_options();
+    options.access_token = Some("REVERSE-TOKEN".into());
+    let hub = Hub::new(handler, options);
+    let reverse = qbridge::server::reverse::spawn(
+        hub.clone(),
+        ReverseConfig {
+            url: url::Url::parse(&format!("ws://{addr}/ws")).unwrap(),
+            role: Role::Universal,
+            reconnect: Duration::from_millis(50),
+        },
+    );
+    assert!(
+        wait_for(
+            || state.headers.lock().unwrap().is_some(),
+            Duration::from_secs(2)
+        )
+        .await
+    );
+    let headers = state.headers.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        headers.get("authorization").unwrap(),
+        "Bearer REVERSE-TOKEN"
     );
     hub.shutdown();
     reverse.abort();

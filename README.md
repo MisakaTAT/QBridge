@@ -257,7 +257,7 @@ target/release/qbridge --config /path/to/qbridge.toml
 | --- | --- | --- |
 | HTTP API | `http://{http.bind}/{action}` | 支持 JSON、query 和表单；也接受尾斜线 |
 | 正向 WebSocket | `ws://{forward_ws.bind}/`、`/api`、`/event` | `/` 同时收发，`/api` 只发动作，`/event` 只收事件 |
-| 反向 WebSocket | `reverse_ws[].url` | 连接时发送 `X-Self-ID` 和 `X-Client-Role` |
+| 反向 WebSocket | `reverse_ws[].url` | 连接时发送 `X-Self-ID`、`X-Client-Role`，配置了 `access_token` 时发送 `Authorization: Bearer` |
 | HTTP POST | `http_post[].url` | 支持 `X-Signature` HMAC-SHA1 签名 |
 
 HTTP 和 WebSocket 支持：
