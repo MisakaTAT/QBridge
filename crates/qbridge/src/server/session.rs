@@ -45,7 +45,17 @@ impl Role {
     }
 }
 
-pub async fn run(hub: Arc<Hub>, role: Role, mut ws: Ws, cancel: CancellationToken) {
+pub async fn run(hub: Arc<Hub>, role: Role, ws: Ws, cancel: CancellationToken) {
+    run_with_observer(hub, role, ws, cancel, |_| {}).await;
+}
+
+async fn run_with_observer(
+    hub: Arc<Hub>,
+    role: Role,
+    mut ws: Ws,
+    cancel: CancellationToken,
+    mut on_tasks_len: impl FnMut(usize),
+) {
     let connect = Event {
         time: crate::bridge::unix_now(),
         self_id: hub.self_id(),
@@ -67,6 +77,11 @@ pub async fn run(hub: Arc<Hub>, role: Role, mut ws: Ws, cancel: CancellationToke
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = shutdown.cancelled() => break,
+            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
+                log_task_result(result);
+                drain_finished_tasks(&mut tasks);
+                on_tasks_len(tasks.len());
+            }
             incoming = ws.next_text() => {
                 let Some(text) = incoming else { break };
                 if !role.accepts_actions() {
@@ -77,6 +92,7 @@ pub async fn run(hub: Arc<Hub>, role: Role, mut ws: Ws, cancel: CancellationToke
                     }
                     continue;
                 }
+                drain_finished_tasks(&mut tasks);
                 handle_request(
                     &hub,
                     &text,
@@ -84,6 +100,7 @@ pub async fn run(hub: Arc<Hub>, role: Role, mut ws: Ws, cancel: CancellationToke
                     semaphore.clone(),
                     &mut tasks,
                 );
+                on_tasks_len(tasks.len());
             }
             Some(text) = outbox_rx.recv() => {
                 if !ws.send_text(&text).await {
@@ -147,8 +164,7 @@ fn handle_request(
         Err(error) => {
             let response = with_echo(parse_failure(error), echo);
             let text = serde_json::to_string(&response).unwrap_or_default();
-            let outbox = outbox.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 let _ = outbox.send(text).await;
             });
             return;
@@ -164,6 +180,20 @@ fn handle_request(
         let text = serde_json::to_string(&response).unwrap_or_default();
         let _ = outbox.send(text).await;
     });
+}
+
+fn drain_finished_tasks(tasks: &mut JoinSet<()>) {
+    while let Some(result) = tasks.try_join_next() {
+        log_task_result(result);
+    }
+}
+
+fn log_task_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && error.is_panic()
+    {
+        tracing::warn!("OB11 WebSocket request task panicked");
+    }
 }
 
 fn parse_failure(error: ParseError) -> Response {
@@ -198,5 +228,115 @@ async fn next_event(events: &mut Option<broadcast::Receiver<Arc<str>>>) -> Event
         Ok(text) => EventResult::Text(text),
         Err(broadcast::error::RecvError::Lagged(_)) => EventResult::Lagged,
         Err(broadcast::error::RecvError::Closed) => EventResult::Closed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::{Handler, HubOptions};
+    use async_trait::async_trait;
+    use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    struct OkHandler;
+
+    #[async_trait]
+    impl Handler for OkHandler {
+        fn self_id(&self) -> i64 {
+            10_000
+        }
+
+        async fn call(&self, _call: Call) -> Result<Value, ActionError> {
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn reaps_completed_request_tasks_while_session_stays_open() {
+        let hub = Hub::new(
+            Arc::new(OkHandler),
+            HubOptions {
+                heartbeat_ms: 0,
+                ..HubOptions::default()
+            },
+        );
+        let active_tasks = Arc::new(AtomicUsize::new(usize::MAX));
+        let server_hub = hub.clone();
+        let server_active = active_tasks.clone();
+        let cancel = CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let app = Router::new().route(
+            "/ws",
+            get(move |ws: WebSocketUpgrade| {
+                let hub = server_hub.clone();
+                let active = server_active.clone();
+                let cancel = server_cancel.clone();
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        run_with_observer(
+                            hub,
+                            Role::Universal,
+                            Ws::Forward(Box::new(socket)),
+                            cancel,
+                            move |len| active.store(len, Ordering::Release),
+                        )
+                        .await;
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+            .await
+            .unwrap();
+        let _connect = socket.next().await.unwrap().unwrap();
+
+        for index in 0..8 {
+            let payload = if index % 2 == 0 {
+                json!({"action": "get_login_info", "params": {}, "echo": index})
+            } else {
+                json!({"action": "send_msg", "params": {}, "echo": index})
+            };
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    payload.to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                reply,
+                tokio_tungstenite::tungstenite::Message::Text(_)
+            ));
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while active_tasks.load(Ordering::Acquire) != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "completed tasks were not reaped; remaining={}",
+                active_tasks.load(Ordering::Acquire)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        cancel.cancel();
+        hub.shutdown();
+        server.abort();
     }
 }
