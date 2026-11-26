@@ -36,6 +36,7 @@ async fn reports_login_status_version_and_capabilities() {
 
     let version = run(&bridge, "get_version_info", json!({})).await.unwrap();
     assert_eq!(version["app_name"], "qbridge");
+    assert_eq!(version["app_version"], qbridge::VERSION);
     assert_eq!(version["protocol_version"], "v11");
 
     assert_eq!(

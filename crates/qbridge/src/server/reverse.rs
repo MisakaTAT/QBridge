@@ -83,7 +83,8 @@ async fn connect(
     );
     request.headers_mut().insert(
         "User-Agent",
-        HeaderValue::from_static(concat!("qbridge/", env!("CARGO_PKG_VERSION"))),
+        HeaderValue::from_str(&format!("qbridge/{}", crate::VERSION))
+            .map_err(|_| "invalid User-Agent header")?,
     );
     if let Some(token) = hub.access_token() {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))

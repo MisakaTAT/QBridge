@@ -95,7 +95,7 @@ pub fn status(bridge: &Bridge) -> Result<Value, ActionError> {
 pub fn version() -> Result<Value, ActionError> {
     Ok(json!({
         "app_name": "qbridge",
-        "app_version": env!("CARGO_PKG_VERSION"),
+        "app_version": crate::VERSION,
         "protocol_version": "v11"
     }))
 }

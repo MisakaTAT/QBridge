@@ -234,20 +234,27 @@ cargo build --release --locked
 cp qbridge.example.toml qbridge.toml
 ```
 
-按 `qbridge.example.toml` 填写配置后运行：
+参照 `qbridge.example.toml` 填写 `qbridge.toml`，检查通过后再启动：
 
 ```sh
 target/release/qbridge --check
 target/release/qbridge
 ```
 
-默认读取当前目录的 `qbridge.toml`，也可以指定配置：
+### 常用命令
 
-```sh
-target/release/qbridge --config /path/to/qbridge.toml
-```
+下表用 `qbridge` 代表可执行文件。源码构建后用 `target/release/qbridge`；在发布包解压目录中用 `./qbridge`。
 
-`--check` 只读取并校验配置和环境变量，不连接 QQ、不启动服务。
+| 用途 | 命令 | 说明 |
+| --- | --- | --- |
+| 启动 | `qbridge` | 读取当前目录的 `qbridge.toml` 并启动服务 |
+| 指定配置启动 | `qbridge --config ./bot.toml` | 使用指定的配置文件 |
+| 检查配置 | `qbridge --check` | 校验配置和所需的环境变量，不连接 QQ，也不启动服务 |
+| 检查指定配置 | `qbridge --check --config ./bot.toml` | 只校验指定的配置文件及其所需的环境变量 |
+| 查看版本 | `qbridge --version` 或 `qbridge -V` | 输出程序版本，不读取配置 |
+| 查看帮助 | `qbridge --help` 或 `qbridge -h` | 显示命令用法，不读取配置 |
+
+发布包的版本来自 Git tag，例如 `v0.1.0-beta.2` 显示为 `qbridge 0.1.0-beta.2`；本地构建默认显示 `qbridge 0.0.0-dev`。
 
 ## 下游接口
 
@@ -303,7 +310,7 @@ data/qbridge.sqlite
 
 数据库保存身份、消息缓存、Gateway 会话和 profile 缓存。
 
-数据库结构版本与程序版本绑定；结构变化时不会自动迁移，需要删除数据库后重新建立。删除后消息缓存和本地数字 ID 会重新生成。
+数据库结构版本独立于程序版本记录；结构变化时不会自动迁移，需要删除数据库后重新建立。删除后消息缓存和本地数字 ID 会重新生成。
 
 ## 开发
 
@@ -311,6 +318,12 @@ data/qbridge.sqlite
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+```
+
+发布 CI 从 Git tag 提取版本，通过编译期环境变量 `QBRIDGE_VERSION` 注入，无需手动修改 `Cargo.toml`。在支持 POSIX 语法的 shell 中，也可为本地构建指定版本：
+
+```sh
+QBRIDGE_VERSION=0.1.0-beta.2 cargo build --release --locked
 ```
 
 工作区：

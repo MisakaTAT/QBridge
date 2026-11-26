@@ -1,4 +1,4 @@
-use qbridge::{app, config::Config};
+use qbridge::{VERSION, app, config::Config};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -22,8 +22,12 @@ async fn main() {
                 config_path = PathBuf::from(path);
             }
             "--check" => check = true,
+            "--version" | "-V" => {
+                println!("qbridge {VERSION}");
+                return;
+            }
             "--help" | "-h" => {
-                println!("usage: qbridge [--config PATH] [--check]");
+                println!("usage: qbridge [--config PATH] [--check] [--version]");
                 return;
             }
             other => {

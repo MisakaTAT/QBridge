@@ -12,3 +12,9 @@ pub mod server;
 pub mod store;
 
 pub use error::{ActionError, NotFoundKind, ReplyContextKind, UnsupportedKind};
+
+/// 程序版本。发布构建由 CI 从 Git tag 注入 `QBRIDGE_VERSION`；本地构建带 `-dev` 后缀。
+pub const VERSION: &str = match option_env!("QBRIDGE_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
+};
