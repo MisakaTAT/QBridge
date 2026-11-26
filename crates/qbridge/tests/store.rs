@@ -141,16 +141,19 @@ async fn deduplicates_inbound_messages_and_patches_the_local_id() {
 #[tokio::test]
 async fn reserves_the_latest_passive_context_and_enforces_limits() {
     let store = memory_store();
-    store
+    let private_user = store
         .identity(IdentityKind::User, "private-user")
         .await
         .unwrap();
-    store.identity(IdentityKind::Group, "group").await.unwrap();
-    store
+    let group = store.identity(IdentityKind::Group, "group").await.unwrap();
+    let expired_user = store
         .identity(IdentityKind::User, "expired-user")
         .await
         .unwrap();
-    for (conversation, limit) in [(Conversation::Private(1), 4), (Conversation::Group(2), 5)] {
+    for (conversation, limit) in [
+        (Conversation::Private(private_user), 4),
+        (Conversation::Group(group), 5),
+    ] {
         let id = store
             .save_inbound(
                 conversation,
@@ -180,7 +183,7 @@ async fn reserves_the_latest_passive_context_and_enforces_limits() {
             .await,
         Err(Error::UnknownTarget)
     ));
-    let expired = Conversation::Private(3);
+    let expired = Conversation::Private(expired_user);
     store
         .save_inbound(expired, "old", 10, 15, &text_event(10, "old"), None)
         .await
@@ -194,10 +197,8 @@ async fn reserves_the_latest_passive_context_and_enforces_limits() {
 #[tokio::test]
 async fn explicit_reply_must_belong_to_the_same_conversation() {
     let store = memory_store();
-    let first = Conversation::Private(1);
-    let second = Conversation::Private(2);
-    store.identity(IdentityKind::User, "one").await.unwrap();
-    store.identity(IdentityKind::User, "two").await.unwrap();
+    let first = Conversation::Private(store.identity(IdentityKind::User, "one").await.unwrap());
+    let second = Conversation::Private(store.identity(IdentityKind::User, "two").await.unwrap());
     let id = store
         .save_inbound(first, "one", 10, 1000, &text_event(10, "one"), None)
         .await
@@ -267,11 +268,11 @@ async fn quote_uses_cached_references_and_requires_them_for_bot_messages() {
 #[tokio::test]
 async fn recall_target_exposes_conversation_and_only_removes_bot_messages() {
     let store = memory_store();
-    let conversation = Conversation::Private(1);
-    store
+    let user = store
         .identity(IdentityKind::User, "user-openid")
         .await
         .unwrap();
+    let conversation = Conversation::Private(user);
     let outbound = store
         .save_outbound(
             conversation,
@@ -388,8 +389,8 @@ async fn gateway_session_round_trips() {
 #[tokio::test]
 async fn concurrent_reservations_are_atomic() {
     let store = std::sync::Arc::new(memory_store());
-    let conversation = Conversation::Private(1);
-    store.identity(IdentityKind::User, "user").await.unwrap();
+    let user = store.identity(IdentityKind::User, "user").await.unwrap();
+    let conversation = Conversation::Private(user);
     store
         .save_inbound(
             conversation,
@@ -594,6 +595,40 @@ async fn hash_ids_are_stable_across_databases() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn default_store_uses_deterministic_hash_ids() {
+    assert_eq!(IdentityOptions::default().mode, IdentityIdMode::Hash);
+    let first = memory_store();
+    let second = memory_store();
+    let one = first
+        .identity(IdentityKind::User, "default-openid")
+        .await
+        .unwrap();
+    let two = second
+        .identity(IdentityKind::User, "default-openid")
+        .await
+        .unwrap();
+    assert_eq!(one, two);
+    assert!(one > 0);
+    assert!(one < (1_i64 << 52));
+}
+
+#[tokio::test]
+async fn sequence_mode_allocates_incremental_ids() {
+    let store = Store::open_with_identity(
+        std::path::Path::new(":memory:"),
+        "app",
+        IdentityOptions {
+            mode: IdentityIdMode::Sequence,
+            ..IdentityOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(store.identity(IdentityKind::User, "u1").await.unwrap(), 1);
+    assert_eq!(store.identity(IdentityKind::Group, "g1").await.unwrap(), 2);
+    assert_eq!(store.identity(IdentityKind::Member, "m1").await.unwrap(), 3);
 }
 
 #[tokio::test]

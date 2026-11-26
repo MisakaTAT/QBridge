@@ -137,8 +137,8 @@ impl IdentityKind {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum IdentityIdMode {
-    #[default]
     Sequence,
+    #[default]
     Hash,
 }
 
@@ -152,7 +152,7 @@ pub struct IdentityOptions {
 impl Default for IdentityOptions {
     fn default() -> Self {
         Self {
-            mode: IdentityIdMode::Sequence,
+            mode: IdentityIdMode::Hash,
             salt: "qbridge".into(),
             bits: 52,
         }
@@ -306,7 +306,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// 打开数据库并检查结构版本与 app_id。默认使用自增 ID。
+    /// 打开数据库并检查结构版本与 app_id。默认使用确定性哈希 ID。
     pub fn open(path: &Path, app_id: &str) -> Result<Self, Error> {
         Self::open_with_identity(path, app_id, IdentityOptions::default())
     }
