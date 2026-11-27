@@ -350,7 +350,13 @@ async fn resolve(
             media,
             text: resolve_text(bridge, &text).await?,
         },
-        Body::Markdown { markdown, keyboard } => ResolvedBody::Markdown { markdown, keyboard },
+        Body::Markdown { markdown, keyboard } => ResolvedBody::Markdown {
+            markdown,
+            keyboard: match keyboard {
+                Some(keyboard) => Some(resolve_keyboard(bridge, keyboard).await?),
+                None => None,
+            },
+        },
         Body::Card(card) => ResolvedBody::Card(qbridge_qq::Card {
             kind: "tuwen".into(),
             content: qbridge_qq::CardContent {
@@ -390,6 +396,82 @@ async fn resolve(
         active: plan.active,
         wakeup: plan.wakeup,
     })
+}
+
+async fn resolve_keyboard(
+    bridge: &Bridge,
+    mut keyboard: Keyboard,
+) -> Result<Keyboard, ActionError> {
+    let Some(content) = keyboard.content.as_mut() else {
+        return Ok(keyboard);
+    };
+    for row in &mut content.rows {
+        for button in &mut row.buttons {
+            let Some(Value::Object(permission)) = button.action.permission.as_mut() else {
+                continue;
+            };
+            let Some(ids) = permission.get_mut("specify_user_ids") else {
+                continue;
+            };
+            if ids.is_null() {
+                continue;
+            }
+            let Value::Array(items) = ids else {
+                return Err(ActionError::BadParam(
+                    "keyboard permission specify_user_ids must be an array".into(),
+                ));
+            };
+            for item in items.iter_mut() {
+                match item {
+                    Value::Number(number) => {
+                        let id = number.as_i64().filter(|id| *id > 0).ok_or_else(|| {
+                            ActionError::BadParam(
+                                "keyboard permission specify_user_ids must contain positive integers or OpenIDs"
+                                    .into(),
+                            )
+                        })?;
+                        let openid = bridge
+                            .store
+                            .openid(crate::store::IdentityKind::Member, id)
+                            .await?
+                            .ok_or(ActionError::NotFound(NotFoundKind::UnknownTarget))?;
+                        *item = Value::String(openid);
+                    }
+                    Value::String(text) => {
+                        if text.is_empty() {
+                            return Err(ActionError::BadParam(
+                                "keyboard permission specify_user_ids cannot contain empty strings"
+                                    .into(),
+                            ));
+                        }
+                        if text.bytes().all(|byte| byte.is_ascii_digit()) {
+                            let id = text.parse::<i64>().ok().filter(|id| *id > 0).ok_or_else(
+                                || {
+                                    ActionError::BadParam(
+                                        "keyboard permission specify_user_ids must contain positive integers or OpenIDs"
+                                            .into(),
+                                    )
+                                },
+                            )?;
+                            let openid = bridge
+                                .store
+                                .openid(crate::store::IdentityKind::Member, id)
+                                .await?
+                                .ok_or(ActionError::NotFound(NotFoundKind::UnknownTarget))?;
+                            *text = openid;
+                        }
+                    }
+                    _ => {
+                        return Err(ActionError::BadParam(
+                            "keyboard permission specify_user_ids must contain integers or OpenIDs"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(keyboard)
 }
 
 async fn resolve_text(bridge: &Bridge, parts: &[TextPart]) -> Result<String, ActionError> {

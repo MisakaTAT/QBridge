@@ -98,7 +98,7 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 | `set_group` | 动作码 | `action=ban/kick/add_request/blacklist_add/blacklist_del/strategy_execute/strategy_delete`，执行后从正文移除 |
 | `reply` | 支持 | 入站消息用 `msg_idx`，机器人消息用发送响应的 `ext_info.ref_idx` |
 | `markdown` | 支持 | 正文或 `custom_template_id` + `params` |
-| `keyboard` | 支持 | 模板 `id` 或自定义 `content`；必须有 Markdown；最多 5 行、每行 5 键 |
+| `keyboard` | 支持 | 模板 `id` 或自定义 `content`；必须有 Markdown；最多 5 行、每行 5 键；自定义按钮 `permission.specify_user_ids` 中的本地数字 ID 自动转换为 OpenID |
 | `node` | 支持 | 纯 node 消息或合并转发扩展动作，渲染为一条 Markdown |
 | `tts` / `face` / `share` / `music` / `xml` / `json` | 不支持 | 返回 `UNSUPPORTED_SEGMENT`；QQ 官方没有对应的通用消息类型，不能用文本伪造 |
 

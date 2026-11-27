@@ -1099,3 +1099,134 @@ async fn applies_custom_cache_ttls_for_sent_inbound_and_profile() {
     assert!(store.profile(member, now + 60).await.unwrap().is_some());
     assert!(store.profile(member, now + 100).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn resolves_keyboard_permission_user_ids_to_openids() {
+    let service = service().await;
+    let store = memory_store();
+    let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
+    let alice = store
+        .identity(IdentityKind::Member, "ALICE_OPENID")
+        .await
+        .unwrap();
+    let bob = store
+        .identity(IdentityKind::User, "BOB_OPENID")
+        .await
+        .unwrap();
+    service.fake.respond(200, json!({"id": "OUT-KB"}));
+    let bridge = service.bridge(store);
+
+    run(
+        &bridge,
+        "send_group_msg",
+        json!({
+            "group_id": group,
+            "active": true,
+            "message": [
+                {"type": "markdown", "data": {"content": "choose"}},
+                {
+                    "type": "keyboard",
+                    "data": {
+                        "content": {
+                            "rows": [{
+                                "buttons": [{
+                                    "id": "1",
+                                    "render_data": {"label": "Go"},
+                                    "action": {
+                                        "type": 2,
+                                        "data": "/go",
+                                        "permission": {
+                                            "type": 0,
+                                            "specify_user_ids": [alice, bob.to_string(), "RAW_OPENID_ABC"]
+                                        }
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .await
+    .unwrap();
+
+    let request = service.fake.requests().remove(0);
+    assert_eq!(
+        request.body["keyboard"]["content"]["rows"][0]["buttons"][0]["action"]["permission"]["specify_user_ids"],
+        json!(["ALICE_OPENID", "BOB_OPENID", "RAW_OPENID_ABC"])
+    );
+
+    let unknown = run(
+        &bridge,
+        "send_group_msg",
+        json!({
+            "group_id": group,
+            "active": true,
+            "message": [
+                {"type": "markdown", "data": {"content": "choose"}},
+                {
+                    "type": "keyboard",
+                    "data": {
+                        "content": {
+                            "rows": [{
+                                "buttons": [{
+                                    "render_data": {"label": "Go"},
+                                    "action": {
+                                        "type": 2,
+                                        "data": "/go",
+                                        "permission": {
+                                            "type": 0,
+                                            "specify_user_ids": [999_999]
+                                        }
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unknown,
+        ActionError::NotFound(qbridge::error::NotFoundKind::UnknownTarget)
+    );
+
+    let invalid = run(
+        &bridge,
+        "send_group_msg",
+        json!({
+            "group_id": group,
+            "active": true,
+            "message": [
+                {"type": "markdown", "data": {"content": "choose"}},
+                {
+                    "type": "keyboard",
+                    "data": {
+                        "content": {
+                            "rows": [{
+                                "buttons": [{
+                                    "render_data": {"label": "Go"},
+                                    "action": {
+                                        "type": 2,
+                                        "data": "/go",
+                                        "permission": {
+                                            "type": 0,
+                                            "specify_user_ids": [true]
+                                        }
+                                    }
+                                }]
+                            }]
+                        }
+                    }
+                }
+            ]
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(invalid, ActionError::BadParam(_)));
+}
