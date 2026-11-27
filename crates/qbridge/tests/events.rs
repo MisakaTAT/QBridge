@@ -47,6 +47,7 @@ async fn translates_c2c_messages_and_caches_content() {
         "https://example.com/a.png"
     );
     assert_eq!(value["sender"]["nickname"], "Alice");
+    assert_eq!(value["to_me"], true);
     assert_eq!(value["qq"]["message_id"], "OFFICIAL");
     assert_eq!(value["qq"]["event_type"], "C2C_MESSAGE_CREATE");
     assert_eq!(value["qq"]["author"]["user_openid"], "USER");
@@ -87,6 +88,7 @@ async fn translates_group_messages_with_member_identity_and_reference() {
     assert_eq!(value["sub_type"], "normal");
     assert_eq!(value["anonymous"], Value::Null);
     assert_eq!(value["sender"]["role"], "admin");
+    assert_eq!(value["to_me"], true);
     assert_eq!(value["qq"]["event_type"], "GROUP_AT_MESSAGE_CREATE");
     let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
     let member = store
@@ -441,6 +443,88 @@ async fn group_message_scene_reference_is_stored_for_quotes() {
         .await
         .unwrap();
     assert_eq!(quote.reference.as_deref(), Some("REF"));
+}
+
+#[tokio::test]
+async fn group_messages_set_to_me_strip_bot_mention_and_map_member_mentions() {
+    let service = service().await;
+    let store = memory_store();
+    let bridge = service.bridge(store.clone());
+
+    let ready = Envelope::from_json(&json!({
+        "t": "READY",
+        "d": {"user": {"id": "BOT_OPENID_1", "username": "QBot"}}
+    }))
+    .unwrap();
+    assert!(bridge.translate(ready).await.is_none());
+
+    let at_msg = Envelope::from_json(&json!({
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "id": "G-AT-1",
+            "content": "  <@!BOT_OPENID_1>   /ping <@!OTHER_MEMBER> <qqbot-at-everyone />",
+            "timestamp": "2099-01-01T00:00:00Z",
+            "group_openid": "GROUP",
+            "author": {"member_openid": "SENDER"}
+        }
+    }))
+    .unwrap();
+    let value = event_value(&bridge.translate(at_msg).await.unwrap());
+    let other_id = store
+        .identity(IdentityKind::Member, "OTHER_MEMBER")
+        .await
+        .unwrap();
+    assert_eq!(value["to_me"], true);
+    assert_eq!(
+        value["message"],
+        json!([
+            {"type": "text", "data": {"text": "/ping "}},
+            {"type": "at", "data": {"qq": other_id.to_string()}},
+            {"type": "text", "data": {"text": " "}},
+            {"type": "at", "data": {"qq": "all"}},
+        ])
+    );
+
+    let plain_msg = Envelope::from_json(&json!({
+        "t": "GROUP_MESSAGE_CREATE",
+        "d": {
+            "id": "G-PLAIN-1",
+            "content": "hi <@!OTHER_MEMBER>",
+            "timestamp": "2099-01-01T00:00:00Z",
+            "group_openid": "GROUP",
+            "author": {"member_openid": "SENDER"}
+        }
+    }))
+    .unwrap();
+    let plain_value = event_value(&bridge.translate(plain_msg).await.unwrap());
+    assert_eq!(plain_value["to_me"], false);
+    assert_eq!(
+        plain_value["message"],
+        json!([
+            {"type": "text", "data": {"text": "hi "}},
+            {"type": "at", "data": {"qq": other_id.to_string()}},
+        ])
+    );
+
+    let group_msg_mentioning_bot = Envelope::from_json(&json!({
+        "t": "GROUP_MESSAGE_CREATE",
+        "d": {
+            "id": "G-PLAIN-2",
+            "content": "<@!BOT_OPENID_1> status",
+            "timestamp": "2099-01-01T00:00:00Z",
+            "group_openid": "GROUP",
+            "author": {"member_openid": "SENDER"}
+        }
+    }))
+    .unwrap();
+    let bot_mention_value = event_value(&bridge.translate(group_msg_mentioning_bot).await.unwrap());
+    assert_eq!(bot_mention_value["to_me"], true);
+    assert_eq!(
+        bot_mention_value["message"],
+        json!([
+            {"type": "text", "data": {"text": "status"}},
+        ])
+    );
 }
 
 trait SceneGroup {

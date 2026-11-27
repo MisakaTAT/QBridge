@@ -28,6 +28,7 @@ use tokio::sync::{Mutex, RwLock};
 pub struct BotState {
     online: Arc<AtomicBool>,
     nickname: RwLock<String>,
+    bot_id: RwLock<Option<String>>,
 }
 
 impl BotState {
@@ -35,6 +36,7 @@ impl BotState {
         Self {
             online,
             nickname: RwLock::new("QQ Official Bot".into()),
+            bot_id: RwLock::new(None),
         }
     }
 
@@ -52,6 +54,14 @@ impl BotState {
 
     pub async fn set_nickname(&self, nickname: impl Into<String>) {
         *self.nickname.write().await = nickname.into();
+    }
+
+    pub async fn bot_id(&self) -> Option<String> {
+        self.bot_id.read().await.clone()
+    }
+
+    pub async fn set_bot_id(&self, id: impl Into<String>) {
+        *self.bot_id.write().await = Some(id.into());
     }
 }
 

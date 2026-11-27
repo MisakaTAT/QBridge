@@ -13,7 +13,7 @@ use crate::{
 };
 use chrono::DateTime;
 use qbridge_ob11::{
-    Event, EventKind, Media, Message, Segment,
+    AtTarget, Event, EventKind, Media, Message, Segment,
     event::{GroupSubType, MessageEvent, MessageScene, PrivateSubType, Role, Sender},
 };
 use qbridge_qq::{
@@ -142,13 +142,22 @@ pub async fn translate(bridge: &Bridge, envelope: Envelope) -> Option<Event> {
         }
         Dispatch::Unknown { t, d } => {
             if t == "READY"
-                && let Some(nickname) = d
-                    .get("user")
-                    .and_then(|user| user.get("username"))
+                && let Some(user) = d.get("user")
+            {
+                if let Some(nickname) = user
+                    .get("username")
                     .and_then(Value::as_str)
                     .filter(|nickname| !nickname.is_empty())
-            {
-                bridge.state.set_nickname(nickname).await;
+                {
+                    bridge.state.set_nickname(nickname).await;
+                }
+                if let Some(id) = user
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
+                    bridge.state.set_bot_id(id).await;
+                }
             }
             return None;
         }
@@ -203,6 +212,7 @@ async fn translate_c2c(
         },
         reference.as_deref(),
         qq,
+        true,
         MessageScene::Private {
             sub_type: PrivateSubType::Friend,
         },
@@ -233,7 +243,9 @@ async fn translate_group(
         .await
         .map_err(|_| "cannot map the group member")?;
     let conversation = Conversation::Group(group_id);
-    let content = build_message(&message.content, &message.attachments)?;
+    let is_at_event = event_type == "GROUP_AT_MESSAGE_CREATE";
+    let (content, to_me) =
+        build_group_message(bridge, &message.content, &message.attachments, is_at_event).await?;
     let reference = scene_reference(&message.message_scene);
     let qq = message_extra(
         event_type,
@@ -257,6 +269,7 @@ async fn translate_group(
         },
         reference.as_deref(),
         qq,
+        to_me,
         MessageScene::Group {
             group_id,
             sub_type: GroupSubType::Normal,
@@ -276,6 +289,7 @@ async fn save_message_event(
     sender: Sender,
     reference: Option<&str>,
     qq: Map<String, Value>,
+    to_me: bool,
     scene: MessageScene,
 ) -> Result<Option<Event>, &'static str> {
     let mut event = Event {
@@ -284,6 +298,7 @@ async fn save_message_event(
         kind: EventKind::Message(MessageEvent::new(scene, 0, user_id, message, sender)),
     };
     if let EventKind::Message(message) = &mut event.kind {
+        message.extra.insert("to_me".into(), Value::Bool(to_me));
         message.extra.insert("qq".into(), Value::Object(qq));
     }
     let cache_ttl = bridge
@@ -327,11 +342,133 @@ fn official_id(content: &Value) -> Result<String, &'static str> {
         .ok_or("QQ message event omitted its official message id")
 }
 
+async fn build_group_message(
+    bridge: &Bridge,
+    content: &str,
+    attachments: &[Attachment],
+    is_at_event: bool,
+) -> Result<(Message, bool), &'static str> {
+    let bot_id = bridge.state.bot_id().await;
+    let mut segments = Vec::new();
+    let mut to_me = is_at_event;
+    let mut trim_leading_space = is_at_event;
+    let mut rest = content;
+
+    while !rest.is_empty() {
+        let Some((index, tag)) = next_group_mention(rest) else {
+            push_text_segment(&mut segments, rest, &mut trim_leading_space);
+            break;
+        };
+        if index > 0 {
+            push_text_segment(&mut segments, &rest[..index], &mut trim_leading_space);
+        }
+        match tag {
+            GroupMention::All(len) => {
+                trim_leading_space = false;
+                segments.push(Segment::At(AtTarget::All));
+                rest = &rest[index + len..];
+            }
+            GroupMention::User { id, len } => {
+                if bot_id.as_deref() == Some(id) {
+                    to_me = true;
+                    trim_leading_space = true;
+                } else if qbridge_qq::MemberOpenId::new(id).is_ok() {
+                    let user_id = bridge
+                        .store
+                        .identity(IdentityKind::Member, id)
+                        .await
+                        .map_err(|_| "cannot map a mentioned group member")?;
+                    trim_leading_space = false;
+                    segments.push(Segment::At(AtTarget::User(user_id)));
+                } else {
+                    push_text_segment(
+                        &mut segments,
+                        &rest[index..index + len],
+                        &mut trim_leading_space,
+                    );
+                }
+                rest = &rest[index + len..];
+            }
+        }
+    }
+
+    append_attachments(&mut segments, attachments)?;
+    Ok((Message(segments), to_me))
+}
+
+enum GroupMention<'a> {
+    All(usize),
+    User { id: &'a str, len: usize },
+}
+
+fn next_group_mention(text: &str) -> Option<(usize, GroupMention<'_>)> {
+    let mut offset = 0;
+    while offset < text.len() {
+        let slice = &text[offset..];
+        let rel = slice.find('<')?;
+        let start = offset + rel;
+        let candidate = &text[start..];
+        if let Some(rest) = candidate.strip_prefix("<qqbot-at-everyone")
+            && let Some(end) = rest.find('>')
+            && rest[..end].trim() == "/"
+        {
+            return Some((
+                start,
+                GroupMention::All("<qqbot-at-everyone".len() + end + 1),
+            ));
+        }
+        if let Some(rest) = candidate.strip_prefix("<@!")
+            && let Some(end) = rest.find('>')
+        {
+            let id = &rest[..end];
+            if !id.is_empty() && !id.contains('<') {
+                return Some((
+                    start,
+                    GroupMention::User {
+                        id,
+                        len: "<@!".len() + end + 1,
+                    },
+                ));
+            }
+        }
+        offset = start + 1;
+    }
+    None
+}
+
+fn push_text_segment(segments: &mut Vec<Segment>, text: &str, trim_leading_space: &mut bool) {
+    let text = if *trim_leading_space {
+        let trimmed = text.trim_start();
+        if !trimmed.is_empty() {
+            *trim_leading_space = false;
+        }
+        trimmed
+    } else {
+        text
+    };
+    if text.is_empty() {
+        return;
+    }
+    if let Some(Segment::Text(existing)) = segments.last_mut() {
+        existing.push_str(text);
+    } else {
+        segments.push(Segment::Text(text.to_owned()));
+    }
+}
+
 fn build_message(content: &str, attachments: &[Attachment]) -> Result<Message, &'static str> {
     let mut segments = Vec::new();
     if !content.is_empty() {
         segments.push(Segment::Text(content.to_owned()));
     }
+    append_attachments(&mut segments, attachments)?;
+    Ok(Message(segments))
+}
+
+fn append_attachments(
+    segments: &mut Vec<Segment>,
+    attachments: &[Attachment],
+) -> Result<(), &'static str> {
     for attachment in attachments {
         let url = attachment
             .url
@@ -376,7 +513,7 @@ fn build_message(content: &str, attachments: &[Attachment]) -> Result<Message, &
             });
         }
     }
-    Ok(Message(segments))
+    Ok(())
 }
 
 fn role(author: &Author) -> Option<Role> {
