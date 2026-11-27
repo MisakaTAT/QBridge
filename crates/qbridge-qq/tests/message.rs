@@ -125,3 +125,27 @@ fn sent_message_allows_a_missing_id() {
     let message: qbridge_qq::SentMessage = serde_json::from_value(json!({})).unwrap();
     assert!(message.id.is_empty());
 }
+
+#[test]
+fn serializes_ark_template_message() {
+    let message = OutgoingMessage::ark(qbridge_qq::Ark {
+        template_id: 23,
+        kv: vec![qbridge_qq::ArkKv {
+            key: "#DESC#".into(),
+            value: Some("summary".into()),
+            obj: None,
+            extra: Default::default(),
+        }],
+        extra: Default::default(),
+    });
+    assert_eq!(
+        serde_json::to_value(message).unwrap(),
+        json!({
+            "msg_type": 3,
+            "ark": {
+                "template_id": 23,
+                "kv": [{"key": "#DESC#", "value": "summary"}]
+            }
+        })
+    );
+}

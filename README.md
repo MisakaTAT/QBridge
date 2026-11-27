@@ -128,6 +128,7 @@ flowchart LR
 
 - [x] `[CQ:file]`
 - [x] `[CQ:card]`
+- [x] `[CQ:ark]`
 - [x] `[CQ:input_notify]`
 - [x] `[CQ:stream]`
 - [x] `[CQ:active]`

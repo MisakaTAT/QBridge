@@ -298,6 +298,7 @@ enum ResolvedBody {
         keyboard: Option<Keyboard>,
     },
     Card(qbridge_qq::Card),
+    Ark(qbridge_qq::Ark),
     InputNotify {
         input_type: u8,
         input_second: u16,
@@ -366,6 +367,7 @@ async fn resolve(
                 url: card.url,
             },
         }),
+        Body::Ark(ark) => ResolvedBody::Ark(ark),
         Body::InputNotify {
             input_type,
             input_second,
@@ -667,6 +669,7 @@ async fn deliver(
             qbridge_qq::OutgoingMessage::markdown(markdown, keyboard)
         }
         ResolvedBody::Card(card) => qbridge_qq::OutgoingMessage::card(card),
+        ResolvedBody::Ark(ark) => qbridge_qq::OutgoingMessage::ark(ark),
         ResolvedBody::InputNotify {
             input_type,
             input_second,

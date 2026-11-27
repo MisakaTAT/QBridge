@@ -94,7 +94,8 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 | `record` | 单个 | 同上；QQ 文件类型为语音 |
 | `video` | 单个 | 同上；QQ 文件类型为视频 |
 | `file` | 单个 | 同上；QQ 文件类型为文件（4），`name` 可覆盖文件名 |
-| `card` | 单个 | 群聊图文卡片（`msg_type=8`）；需要 `pic` 和 `url` |
+| `card` | 单个 | 图文卡片（`msg_type=8`，群聊与单聊均支持）；需要 `pic` 和 `url` |
+| `ark` | 单个 | Ark 模板卡片（`msg_type=3`）；需要正整数 `template_id` 与可选 `kv` 数组（支持 JSON 字符串） |
 | `input_notify` | 单个 | 单聊输入状态（`msg_type=6`）；`type` 默认 1，`second` 默认 60；不产生可缓存消息，成功返回 `message_id=0` |
 | `active` | 修饰段 | 主动发送标记（等价于动作参数 `active=true`），省略被动回复上下文，不能与 `reply` 同用 |
 | `wakeup` | 修饰段 | C2C 互动召回；标记 `is_wakeup=true`，要求单聊目标 |

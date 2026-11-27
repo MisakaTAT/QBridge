@@ -429,6 +429,47 @@ fn plans_file_card_input_and_wakeup_segments() {
         plan_message(Message(vec![other("active", json!({}))]), json!({})).unwrap_err(),
         ActionError::BadParam(_)
     ));
+
+    let private_card = plan::plan(
+        Target::Private(1),
+        &Message(vec![other(
+            "card",
+            json!({"title": "PT", "desc": "PD", "pic": "https://example.com/p.png", "url": "https://example.com"}),
+        )]),
+        &Map::new(),
+    )
+    .unwrap();
+    assert!(matches!(private_card.body, Body::Card(_)));
+
+    let ark = plan_message(
+        Message(vec![other(
+            "ark",
+            json!({
+                "template_id": "23",
+                "kv": "[{\"key\":\"#DESC#\",\"value\":\"hello\"}]"
+            }),
+        )]),
+        json!({}),
+    )
+    .unwrap();
+    let Body::Ark(ark) = ark.body else {
+        panic!("expected ark body")
+    };
+    assert_eq!(ark.template_id, 23);
+    assert_eq!(ark.kv.len(), 1);
+    assert_eq!(ark.kv[0].key, "#DESC#");
+
+    assert_eq!(
+        plan_message(
+            Message(vec![
+                other("ark", json!({"template_id": 23})),
+                Segment::Text("mixed".into()),
+            ]),
+            json!({}),
+        )
+        .unwrap_err(),
+        ActionError::Unsupported(UnsupportedKind::MessageCombination)
+    );
 }
 
 #[test]

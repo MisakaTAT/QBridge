@@ -3,7 +3,7 @@
 use crate::error::{ActionError, UnsupportedKind};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use qbridge_ob11::{AtTarget, Media, Message, Node, Segment, Target};
-use qbridge_qq::{Keyboard, KeyboardContent, Markdown, MarkdownParam};
+use qbridge_qq::{Ark, ArkKv, Keyboard, KeyboardContent, Markdown, MarkdownParam};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use url::Url;
@@ -34,6 +34,7 @@ pub enum Body {
         options: ForwardOptions,
     },
     Card(CardPlan),
+    Ark(Ark),
     InputNotify {
         input_type: u8,
         input_second: u16,
@@ -132,6 +133,7 @@ pub fn plan(
     let mut reply: Option<i32> = None;
     let mut nodes = Vec::new();
     let mut card: Option<CardPlan> = None;
+    let mut ark: Option<Ark> = None;
     let mut input_notify: Option<(u8, u16)> = None;
     let mut stream: Option<StreamState> = None;
     let mut wakeup = false;
@@ -194,6 +196,14 @@ pub fn plan(
                     ));
                 }
                 card = Some(parse_card(data)?);
+            }
+            Segment::Other { kind, data } if kind == "ark" => {
+                if ark.is_some() {
+                    return Err(ActionError::Unsupported(
+                        UnsupportedKind::MessageCombination,
+                    ));
+                }
+                ark = Some(parse_ark(data)?);
             }
             Segment::Other { kind, data } if kind == "input_notify" => {
                 if input_notify.is_some() {
@@ -315,11 +325,25 @@ pub fn plan(
         ));
     }
     if card.is_some()
-        && (!matches!(target, Target::Group(_))
-            || !text.is_empty()
+        && (!text.is_empty()
             || media.is_some()
             || markdown.is_some()
+            || ark.is_some()
             || input_notify.is_some()
+            || !nodes.is_empty())
+    {
+        return Err(ActionError::Unsupported(
+            UnsupportedKind::MessageCombination,
+        ));
+    }
+    if ark.is_some()
+        && (!text.is_empty()
+            || media.is_some()
+            || markdown.is_some()
+            || keyboard.is_some()
+            || card.is_some()
+            || input_notify.is_some()
+            || stream.is_some()
             || !nodes.is_empty())
     {
         return Err(ActionError::Unsupported(
@@ -332,6 +356,7 @@ pub fn plan(
             || media.is_some()
             || markdown.is_some()
             || card.is_some()
+            || ark.is_some()
             || !nodes.is_empty())
     {
         return Err(ActionError::Unsupported(
@@ -343,6 +368,7 @@ pub fn plan(
             || media.is_some()
             || markdown.is_some()
             || card.is_some()
+            || ark.is_some()
             || input_notify.is_some()
             || !nodes.is_empty()
             || reply.is_some())
@@ -399,6 +425,14 @@ pub fn plan(
     if let Some(card) = card {
         return Ok(Plan {
             body: Body::Card(card),
+            reply,
+            active,
+            wakeup,
+        });
+    }
+    if let Some(ark) = ark {
+        return Ok(Plan {
+            body: Body::Ark(ark),
             reply,
             active,
             wakeup,
@@ -536,6 +570,47 @@ fn integer_field(data: &Map<String, Value>, key: &str) -> Result<i64, ActionErro
             .map_err(|_| ActionError::BadParam(format!("{key} must be an integer"))),
         _ => Err(ActionError::BadParam(format!("{key} is required"))),
     }
+}
+
+fn parse_ark(data: &Map<String, Value>) -> Result<Ark, ActionError> {
+    let owned: Map<String, Value>;
+    let source = match data.get("ark") {
+        Some(Value::Object(object)) => object,
+        Some(Value::String(text)) => {
+            owned = serde_json::from_str::<Map<String, Value>>(text)
+                .map_err(|_| ActionError::BadParam("ark JSON is invalid".into()))?;
+            &owned
+        }
+        Some(_) => return Err(ActionError::BadParam("ark must be an object".into())),
+        None => data,
+    };
+    let template_id = integer_field(source, "template_id")?;
+    if template_id <= 0 {
+        return Err(ActionError::BadParam(
+            "ark template_id must be positive".into(),
+        ));
+    }
+    let kv: Vec<ArkKv> = match source.get("kv") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => serde_json::from_value(Value::Array(items.clone()))
+            .map_err(|_| ActionError::BadParam("invalid ark kv entries".into()))?,
+        Some(Value::String(text)) => serde_json::from_str(text)
+            .map_err(|_| ActionError::BadParam("invalid ark kv JSON".into()))?,
+        Some(_) => return Err(ActionError::BadParam("ark kv must be an array".into())),
+    };
+    for entry in &kv {
+        if entry.key.trim().is_empty() {
+            return Err(ActionError::BadParam("ark kv key cannot be empty".into()));
+        }
+    }
+    let mut extra = source.clone();
+    extra.remove("template_id");
+    extra.remove("kv");
+    Ok(Ark {
+        template_id,
+        kv,
+        extra,
+    })
 }
 
 fn parse_card(data: &Map<String, Value>) -> Result<CardPlan, ActionError> {

@@ -1230,3 +1230,62 @@ async fn resolves_keyboard_permission_user_ids_to_openids() {
     .unwrap_err();
     assert!(matches!(invalid, ActionError::BadParam(_)));
 }
+
+#[tokio::test]
+async fn sends_private_card_and_ark_messages() {
+    let service = service().await;
+    let store = memory_store();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
+    service.fake.respond(200, json!({"id": "CARD-OUT"}));
+    service.fake.respond(200, json!({"id": "ARK-OUT"}));
+    let bridge = service.bridge(store);
+
+    run(
+        &bridge,
+        "send_private_msg",
+        json!({
+            "user_id": user,
+            "active": true,
+            "message": {
+                "type": "card",
+                "data": {
+                    "title": "Hello",
+                    "desc": "C2C Card",
+                    "pic": "https://example.com/p.png",
+                    "url": "https://example.com"
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    run(
+        &bridge,
+        "send_group_msg",
+        json!({
+            "group_id": group,
+            "active": true,
+            "message": {
+                "type": "ark",
+                "data": {
+                    "template_id": 23,
+                    "kv": [{"key": "#DESC#", "value": "Ark Desc"}]
+                }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].path, "/v2/users/USER/messages");
+    assert_eq!(requests[0].body["msg_type"], 8);
+    assert_eq!(requests[0].body["card"]["content"]["title"], "Hello");
+
+    assert_eq!(requests[1].path, "/v2/groups/GROUP/messages");
+    assert_eq!(requests[1].body["msg_type"], 3);
+    assert_eq!(requests[1].body["ark"]["template_id"], 23);
+    assert_eq!(requests[1].body["ark"]["kv"][0]["value"], "Ark Desc");
+}

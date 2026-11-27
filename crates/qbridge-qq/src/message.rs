@@ -28,9 +28,45 @@ pub struct OutgoingMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     card: Option<Card>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ark: Option<Ark>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     input_notify: Option<InputNotify>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     is_wakeup: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ark {
+    pub template_id: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kv: Vec<ArkKv>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArkKv {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obj: Option<Vec<ArkObj>>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArkObj {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obj_kv: Vec<ArkObjKv>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArkObjKv {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -69,6 +105,7 @@ impl OutgoingMessage {
             msg_seq: None,
             message_reference: None,
             card: None,
+            ark: None,
             input_notify: None,
             is_wakeup: false,
         }
@@ -86,6 +123,25 @@ impl OutgoingMessage {
             msg_seq: None,
             message_reference: None,
             card: None,
+            ark: None,
+            input_notify: None,
+            is_wakeup: false,
+        }
+    }
+
+    /// `msg_type=3`：Ark 模板卡片。
+    pub fn ark(ark: Ark) -> Self {
+        Self {
+            msg_type: 3,
+            content: None,
+            markdown: None,
+            keyboard: None,
+            media: None,
+            msg_id: None,
+            msg_seq: None,
+            message_reference: None,
+            card: None,
+            ark: Some(ark),
             input_notify: None,
             is_wakeup: false,
         }
@@ -105,12 +161,13 @@ impl OutgoingMessage {
             msg_seq: None,
             message_reference: None,
             card: None,
+            ark: None,
             input_notify: None,
             is_wakeup: false,
         }
     }
 
-    /// `msg_type=8`：群聊图文卡片。
+    /// `msg_type=8`：图文卡片（群聊与单聊）。
     pub fn card(card: Card) -> Self {
         Self {
             msg_type: 8,
@@ -122,6 +179,7 @@ impl OutgoingMessage {
             msg_seq: None,
             message_reference: None,
             card: Some(card),
+            ark: None,
             input_notify: None,
             is_wakeup: false,
         }
@@ -139,6 +197,7 @@ impl OutgoingMessage {
             msg_seq: None,
             message_reference: None,
             card: None,
+            ark: None,
             input_notify: Some(InputNotify {
                 input_type,
                 input_second,
