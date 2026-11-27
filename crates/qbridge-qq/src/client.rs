@@ -34,7 +34,7 @@ use tokio::{
 use tracing::Instrument;
 use url::Url;
 
-const API_BASE: &str = "https://api.sgroup.qq.com";
+const API_BASE: &str = "https://api.bot.qq.com";
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const BODY_LIMIT: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
