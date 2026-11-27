@@ -111,6 +111,12 @@ pub struct Author {
     #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
+    pub nickname: Option<String>,
+    #[serde(default)]
+    pub member_nickname: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
     pub member_role: Option<String>,
     #[serde(default)]
     pub bot: Option<bool>,
@@ -127,6 +133,26 @@ impl Author {
     /// 群聊发送者。
     pub fn member_openid(&self) -> Option<&str> {
         self.member_openid.as_deref()
+    }
+
+    /// 发送者昵称，兼容 `username` / `nickname` / `member_nickname`。
+    pub fn display_nickname(&self) -> Option<&str> {
+        self.username
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .or_else(|| self.nickname.as_deref().filter(|name| !name.is_empty()))
+            .or_else(|| {
+                self.member_nickname
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+            })
+    }
+
+    /// 群内昵称（群名片）。
+    pub fn group_card(&self) -> Option<&str> {
+        self.member_nickname
+            .as_deref()
+            .filter(|card| !card.is_empty())
     }
 }
 
@@ -180,6 +206,8 @@ pub struct GroupMessage {
     pub author: Author,
     pub group_openid: String,
     #[serde(default)]
+    pub union_group_openid: Option<String>,
+    #[serde(default)]
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub message_scene: Option<Value>,
@@ -201,6 +229,8 @@ pub struct UserEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupRobotEvent {
     pub group_openid: String,
+    #[serde(default)]
+    pub union_group_openid: Option<String>,
     #[serde(default)]
     pub op_member_openid: Option<String>,
     #[serde(default)]
@@ -237,6 +267,8 @@ pub struct Interaction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupMemberEvent {
     pub group_openid: String,
+    #[serde(default)]
+    pub union_group_openid: Option<String>,
     pub member_openid: String,
     #[serde(default)]
     pub op_member_openid: Option<String>,
@@ -251,6 +283,8 @@ pub struct GroupMemberEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupJoinRequest {
     pub group_openid: String,
+    #[serde(default)]
+    pub union_group_openid: Option<String>,
     pub join_request_id: String,
     pub member_openid: String,
     #[serde(default)]

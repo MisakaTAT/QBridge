@@ -435,6 +435,8 @@ pub struct GroupInfo {
     #[serde(default)]
     pub group_openid: Option<String>,
     #[serde(default)]
+    pub union_group_openid: Option<String>,
+    #[serde(default)]
     pub group_name: String,
     #[serde(default)]
     pub group_finger_memo: Option<String>,

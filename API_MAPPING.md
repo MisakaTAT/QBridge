@@ -158,6 +158,7 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 
 - 附件按 MIME 转为 `image`、`record`、`video`；其他类型转为 `qq_attachment` 扩展段。
 - 入站消息附加 `to_me` 布尔字段（私聊与 `GROUP_AT_MESSAGE_CREATE` 为 `true`，`GROUP_MESSAGE_CREATE` 仅在提及机器人时为 `true`）；群消息自动剔除 `@机器人` 与紧随的前导空白，并将 `<@!member_openid>` / `<qqbot-at-everyone />` 还原为 OB11 `at` 段。
+- 入站消息解析发送者昵称、群内昵称（`member_nickname` → `sender.card`）与头像并自动写入 `profile_cache`；群聊事件与群资料显式保留 `union_group_openid`。
 - `qq` 扩展字段保留官方消息 ID、作者、`message_scene` 和原始事件数据。
 - 群成员和入群申请事件需要 Gateway intent `group_member`（1<<24）；入群申请的 `flag` 格式为 `qq_group:{group_id}:{user_id}:{join_request_id}`，`set_group_add_request` 会解析它。
 - 官方 `GROUP_MEMBER_ADD`/`GROUP_MEMBER_REMOVE` 事件体只有 `timestamp`、`group_openid`、`member_openid`（退出事件另有 `user_openid`），**不包含操作者**。因此 `operator_id` 为 `null`，无法仅凭事件判断是群主/管理员操作还是成员主动退出；只有部分平台版本额外携带 `op_member_openid` 时才能映射操作者和 `kick`。

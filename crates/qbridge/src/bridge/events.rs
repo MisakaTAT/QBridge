@@ -198,6 +198,25 @@ async fn translate_c2c(
         &message.message_scene,
         serde_json::to_value(&message).unwrap_or(Value::Null),
     );
+    let nickname = message.author.display_nickname().map(str::to_owned);
+    let avatar = message
+        .author
+        .avatar
+        .as_deref()
+        .filter(|avatar| !avatar.is_empty());
+    if nickname.is_some() || avatar.is_some() {
+        let _ = bridge
+            .store
+            .save_profile(
+                user_id,
+                nickname.as_deref().unwrap_or_default(),
+                "",
+                avatar.unwrap_or_default(),
+                bridge.cache.profile_ttl_secs,
+                time,
+            )
+            .await;
+    }
     save_message_event(
         bridge,
         conversation,
@@ -206,7 +225,7 @@ async fn translate_c2c(
         content,
         Sender {
             user_id,
-            nickname: message.author.username.clone(),
+            nickname,
             card: None,
             role: None,
         },
@@ -255,6 +274,26 @@ async fn translate_group(
         &message.message_scene,
         serde_json::to_value(&message).unwrap_or(Value::Null),
     );
+    let nickname = message.author.display_nickname().map(str::to_owned);
+    let card = message.author.group_card().map(str::to_owned);
+    let avatar = message
+        .author
+        .avatar
+        .as_deref()
+        .filter(|avatar| !avatar.is_empty());
+    if nickname.is_some() || card.is_some() || avatar.is_some() {
+        let _ = bridge
+            .store
+            .save_profile(
+                user_id,
+                nickname.as_deref().unwrap_or_default(),
+                card.as_deref().unwrap_or_default(),
+                avatar.unwrap_or_default(),
+                bridge.cache.profile_ttl_secs,
+                time,
+            )
+            .await;
+    }
     save_message_event(
         bridge,
         conversation,
@@ -263,8 +302,8 @@ async fn translate_group(
         content,
         Sender {
             user_id,
-            nickname: message.author.username.clone(),
-            card: None,
+            nickname,
+            card,
             role: role(&message.author),
         },
         reference.as_deref(),

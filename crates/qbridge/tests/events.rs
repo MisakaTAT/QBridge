@@ -527,6 +527,76 @@ async fn group_messages_set_to_me_strip_bot_mention_and_map_member_mentions() {
     );
 }
 
+#[tokio::test]
+async fn inbound_messages_capture_member_nickname_avatar_and_union_group_openid() {
+    let service = service().await;
+    let store = memory_store();
+    let bridge = service.bridge(store.clone());
+
+    let group_msg = Envelope::from_json(&json!({
+        "t": "GROUP_AT_MESSAGE_CREATE",
+        "d": {
+            "id": "G-PROF-1",
+            "content": "hi",
+            "timestamp": "2099-01-01T00:00:00Z",
+            "group_openid": "GROUP",
+            "union_group_openid": "UNION-GROUP-1",
+            "author": {
+                "member_openid": "MEMBER",
+                "username": "Bob",
+                "member_nickname": "群主Bob",
+                "avatar": "https://example.com/bob.png",
+                "member_role": "owner"
+            }
+        }
+    }))
+    .unwrap();
+    let group_value = event_value(&bridge.translate(group_msg).await.unwrap());
+    assert_eq!(group_value["sender"]["nickname"], "Bob");
+    assert_eq!(group_value["sender"]["card"], "群主Bob");
+    assert_eq!(
+        group_value["qq"]["data"]["union_group_openid"],
+        "UNION-GROUP-1"
+    );
+    let member_id = store
+        .identity(IdentityKind::Member, "MEMBER")
+        .await
+        .unwrap();
+    let group_profile = store
+        .profile(member_id, 4_070_908_800)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(group_profile.display_name, "Bob");
+    assert_eq!(group_profile.card, "群主Bob");
+    assert_eq!(group_profile.avatar_url, "https://example.com/bob.png");
+
+    let c2c_msg = Envelope::from_json(&json!({
+        "t": "C2C_MESSAGE_CREATE",
+        "d": {
+            "id": "C-PROF-1",
+            "content": "hello",
+            "timestamp": "2099-01-01T00:00:00Z",
+            "author": {
+                "user_openid": "USER",
+                "nickname": "Alice",
+                "avatar": "https://example.com/alice.png"
+            }
+        }
+    }))
+    .unwrap();
+    let c2c_value = event_value(&bridge.translate(c2c_msg).await.unwrap());
+    assert_eq!(c2c_value["sender"]["nickname"], "Alice");
+    let user_id = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let user_profile = store
+        .profile(user_id, 4_070_908_800)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user_profile.display_name, "Alice");
+    assert_eq!(user_profile.avatar_url, "https://example.com/alice.png");
+}
+
 trait SceneGroup {
     fn scene_group_id(&self) -> i64;
 }
