@@ -9,6 +9,7 @@ use crate::{
     error::{ActionError, NotFoundKind},
     store::{Conversation, IdentityKind},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use qbridge_ob11::{
     Action, Message, Segment, Target,
@@ -57,6 +58,9 @@ pub async fn execute(
         "set_panel" => set_panel(bridge, params).await,
         "delete_panel" => delete_panel(bridge, params).await,
         "set_panel_target" => set_panel_target(bridge, params).await,
+        "get_media_image_list" => media_image_list(bridge, params).await,
+        "upload_media_image" => upload_media_image(bridge, params).await,
+        "delete_media_image" => delete_media_image(bridge, params).await,
         _ => Err(ActionError::UnknownAction),
     }
 }
@@ -683,4 +687,90 @@ async fn group_ban(bridge: &Bridge, params: Map<String, Value>) -> Result<Value,
         object.insert("group_id".into(), group_id.into());
     }
     Ok(response)
+}
+
+async fn media_image_list(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+) -> Result<Value, ActionError> {
+    let cursor = params.get("cursor").and_then(Value::as_str);
+    Ok(bridge.qq.media_images(cursor).await?)
+}
+
+async fn delete_media_image(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+) -> Result<Value, ActionError> {
+    let image_id = params
+        .get("image_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ActionError::BadParam("image_id is required".into()))?;
+    bridge.qq.delete_media_image(image_id).await?;
+    Ok(Value::Null)
+}
+
+async fn upload_media_image(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+) -> Result<Value, ActionError> {
+    let file = params
+        .get("file")
+        .and_then(Value::as_str)
+        .filter(|file| !file.is_empty())
+        .ok_or_else(|| ActionError::BadParam("file is required".into()))?;
+    let override_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned);
+    let (data, default_name) = if let Some(encoded) = file.strip_prefix("base64://") {
+        let data = STANDARD
+            .decode(encoded)
+            .map_err(|_| ActionError::BadParam("invalid media image base64".into()))?;
+        (data, "image.png".to_owned())
+    } else if let Some(rest) = file.strip_prefix("file://") {
+        let path = url::Url::parse(file)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from(rest));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image.png")
+            .to_owned();
+        let data = tokio::fs::read(&path)
+            .await
+            .map_err(|_| ActionError::BadParam("cannot read media image file".into()))?;
+        (data, name)
+    } else {
+        return Err(ActionError::BadParam(
+            "upload_media_image file must use base64:// or file://".into(),
+        ));
+    };
+    if data.is_empty() || data.len() > 10_000_000 {
+        return Err(ActionError::BadParam(
+            "media image must be between 1 byte and 10 MB".into(),
+        ));
+    }
+    let file_name = override_name.unwrap_or(default_name);
+    let content_type = media_image_content_type(&file_name);
+    let uploaded = bridge
+        .qq
+        .upload_media_image(&data, &file_name, content_type)
+        .await?;
+    Ok(serde_json::to_value(uploaded).unwrap_or(Value::Null))
+}
+
+fn media_image_content_type(file_name: &str) -> &'static str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
 }

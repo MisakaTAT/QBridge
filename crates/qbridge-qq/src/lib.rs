@@ -21,7 +21,7 @@ pub use gateway::{GatewayConfig, GatewayStream, Session, SessionStore, Shard, Sh
 pub use message::{
     BotProfile, Card, CardContent, GroupInfo, Keyboard, KeyboardContent, Markdown, MarkdownParam,
     MediaSource, MediaUpload, Member, MemberPage, MessageReference, MuteOp, OutgoingMessage,
-    SentMessage, UploadedMedia, UserInfo,
+    SentMessage, UploadedMedia, UploadedMediaImage, UserInfo,
 };
 pub use openid::{GroupOpenId, MemberOpenId, OpenIdError, Peer, UserOpenId};
 pub use webhook::{Webhook, WebhookConfig, WebhookStream};

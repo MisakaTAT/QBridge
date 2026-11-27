@@ -221,6 +221,9 @@ flowchart LR
 - [x] `set_panel`
 - [x] `delete_panel`
 - [x] `set_panel_target`
+- [x] `get_media_image_list`
+- [x] `upload_media_image`
+- [x] `delete_media_image`
 
 不支持的标准动作会返回 `UNSUPPORTED_ACTION`，不支持的 CQ 码会返回 `UNSUPPORTED_SEGMENT`，不会用文本伪造成功。
 

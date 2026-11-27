@@ -304,6 +304,15 @@ pub struct UploadedMedia {
     pub id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UploadedMediaImage {
+    #[serde(default)]
+    pub image_id: String,
+    pub url: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 /// 发送成功后的消息信息。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SentMessage {

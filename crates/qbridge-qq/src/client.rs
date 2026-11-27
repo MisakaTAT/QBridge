@@ -7,7 +7,7 @@ use crate::{
     error::Error,
     message::{
         BotProfile, GroupInfo, MediaUpload, Member, MemberPage, MuteOp, OutgoingMessage,
-        SentMessage, UploadedMedia, UserInfo,
+        SentMessage, UploadedMedia, UploadedMediaImage, UserInfo,
     },
     openid::{GroupOpenId, MemberOpenId, Peer, UserOpenId},
     redact,
@@ -69,8 +69,10 @@ const JOIN_STRATEGY_EXECUTE: &str = "/v2/groups/join_approval_strategy/{strategy
 const JOIN_STRATEGY_WHITELIST: &str =
     "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users";
 const GENERATE_URL_LINK: &str = "/v2/generate_url_link";
+const MEDIA_IMAGES: &str = "/v2/media-images";
 const MEDIA_IMAGE_PREPARE: &str = "/v2/media-images/prepare";
 const MEDIA_IMAGE_COMPLETE: &str = "/v2/media-images/complete";
+const MEDIA_IMAGE_DELETE: &str = "/v2/media-images/{image_id}/delete";
 const CUSTOM_MENU: &str = "/v2/menu";
 const PANELS: &str = "/v2/panels";
 const PANEL: &str = "/v2/panels/{panel_id}";
@@ -215,11 +217,6 @@ pub struct StreamRequest {
 struct MediaImagePrepare {
     upload_id: String,
     presigned_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct MediaImageComplete {
-    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1025,13 +1022,13 @@ impl Client {
             .map(|_| ())
     }
 
-    /// 上传 Markdown 图片素材，返回 `qqbot-media://image/v1/<token>`。
-    pub async fn upload_markdown_image(
+    /// 上传 Markdown 图片素材，返回素材信息（含 `image_id` 与 `qqbot-media://` URL）。
+    pub async fn upload_media_image(
         &self,
         data: &[u8],
         file_name: &str,
         content_type: &str,
-    ) -> Result<String, Error> {
+    ) -> Result<UploadedMediaImage, Error> {
         if data.is_empty() || data.len() > 10_000_000 {
             return Err(Error::decode("markdown image must be 1 byte to 10 MB"));
         }
@@ -1075,7 +1072,7 @@ impl Client {
             .map(|value| value.trim_matches('"').to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| md5_hex(data));
-        let completed: MediaImageComplete = self
+        let completed: UploadedMediaImage = self
             .request(
                 Method::POST,
                 MEDIA_IMAGE_COMPLETE,
@@ -1087,7 +1084,44 @@ impl Client {
         if completed.url.is_empty() {
             return Err(Error::decode("media-image complete omitted url"));
         }
-        Ok(completed.url)
+        Ok(completed)
+    }
+
+    /// 上传 Markdown 图片素材，返回 `qqbot-media://image/v1/<token>`。
+    pub async fn upload_markdown_image(
+        &self,
+        data: &[u8],
+        file_name: &str,
+        content_type: &str,
+    ) -> Result<String, Error> {
+        Ok(self
+            .upload_media_image(data, file_name, content_type)
+            .await?
+            .url)
+    }
+
+    /// 分页查询有效 Markdown 图片素材列表。
+    pub async fn media_images(&self, cursor: Option<&str>) -> Result<Value, Error> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor.filter(|cursor| !cursor.is_empty()) {
+            query.push(("cursor", cursor));
+        }
+        self.request(Method::GET, MEDIA_IMAGES, &[], &query, None)
+            .await
+    }
+
+    /// 删除已上传的 Markdown 图片素材，释放配额。
+    pub async fn delete_media_image(&self, image_id: &str) -> Result<(), Error> {
+        let image_id = path_segment(image_id, "image_id")?;
+        self.request::<serde::de::IgnoredAny>(
+            Method::DELETE,
+            MEDIA_IMAGE_DELETE,
+            &[image_id],
+            &[],
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// QQ 官方头像直链（openid 不是 QQ 号，必须使用 qqapp 形式）。

@@ -52,6 +52,7 @@
 | `join_approval_strategy_delete` | 支持扩展 | 删除策略 |
 | `get_custom_menu` / `set_custom_menu` | 支持扩展 | C2C 自定义菜单读取/覆盖设置 |
 | `get_panel_list` / `create_panel` / `get_panel` / `set_panel` / `delete_panel` / `set_panel_target` | 支持扩展 | 指令面板管理；`get_panel_list` 必须传 `scope=c2c/group/channel/dm` |
+| `get_media_image_list` / `upload_media_image` / `delete_media_image` | 支持扩展 | Markdown 图片素材分页查询、上传（`base64://` / `file://`）与删除释放配额 |
 | `get_stranger_info` | 支持 | 优先读取未过期 `profile_cache`（`no_cache=true` 跳过缓存），未命中时调用 `GET /v2/users/{user_openid}/info` |
 | `get_login_info` | 支持 | 返回配置的 `self_id` 与机器人昵称（Gateway 来自 `READY`，Webhook 等场景首次调用按需拉取 `GET /users/@me`） |
 | `get_status` | 支持 | `online`/`good` 来自 QQ 事件源连接状态；`identity` 返回缓存/批量/profile/绑定等计数 |

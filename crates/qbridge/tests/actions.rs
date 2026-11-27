@@ -876,3 +876,50 @@ async fn fetches_bot_profile_lazily_and_serves_stranger_info() {
     assert_eq!(requests[1].path, "/v2/users/USER/info");
     assert_eq!(requests[2].path, "/v2/users/USER/info");
 }
+
+#[tokio::test]
+async fn manages_media_images() {
+    let service = service().await;
+    let bridge = service.bridge(memory_store());
+
+    let upload_url = format!("{}/upload-media", service.base);
+    service
+        .fake
+        .respond(200, json!({"upload_id": "U1", "presigned_url": upload_url}));
+    service.fake.respond(200, json!({}));
+    service.fake.respond(
+        200,
+        json!({"image_id": "IMG-1", "url": "qqbot-media://image/v1/abc"}),
+    );
+    let uploaded = run(
+        &bridge,
+        "upload_media_image",
+        json!({"file": "base64://QUJD", "name": "test.png"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(uploaded["image_id"], "IMG-1");
+    assert_eq!(uploaded["url"], "qqbot-media://image/v1/abc");
+
+    service.fake.respond(
+        200,
+        json!({"images": [{"image_id": "IMG-1"}], "next_cursor": "", "total": 1}),
+    );
+    let list = run(&bridge, "get_media_image_list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(list["total"], 1);
+
+    service.fake.respond(200, json!({}));
+    run(&bridge, "delete_media_image", json!({"image_id": "IMG-1"}))
+        .await
+        .unwrap();
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].path, "/v2/media-images/prepare");
+    assert_eq!(requests[1].path, "/upload-media");
+    assert_eq!(requests[2].path, "/v2/media-images/complete");
+    assert_eq!(requests[3].path, "/v2/media-images");
+    assert_eq!(requests[4].method, "DELETE");
+    assert_eq!(requests[4].path, "/v2/media-images/IMG-1/delete");
+}

@@ -726,3 +726,50 @@ async fn queries_bot_profile_and_user_info() {
     assert_eq!(requests[1].method, "GET");
     assert_eq!(requests[1].path, "/v2/users/USER1/info");
 }
+
+#[tokio::test]
+async fn lists_uploads_and_deletes_media_images() {
+    let service = service().await;
+    let upload_url = format!("{}/upload-slot", service.base);
+    service.fake.respond(
+        200,
+        json!({"upload_id": "UP-1", "presigned_url": upload_url}),
+    );
+    service.fake.respond(200, json!({}));
+    service.fake.respond(
+        200,
+        json!({"image_id": "IMG-1", "url": "qqbot-media://image/v1/abc"}),
+    );
+    let uploaded = service
+        .client()
+        .upload_media_image(b"PNGDATA", "a.png", "image/png")
+        .await
+        .unwrap();
+    assert_eq!(uploaded.image_id, "IMG-1");
+    assert_eq!(uploaded.url, "qqbot-media://image/v1/abc");
+
+    service.fake.respond(
+        200,
+        json!({
+            "images": [{"image_id": "IMG-1", "url": "qqbot-media://image/v1/abc"}],
+            "next_cursor": "",
+            "total": 1
+        }),
+    );
+    let list = service.client().media_images(Some("CUR-1")).await.unwrap();
+    assert_eq!(list["total"], 1);
+
+    service.fake.respond(200, json!({}));
+    service.client().delete_media_image("IMG-1").await.unwrap();
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].path, "/v2/media-images/prepare");
+    assert_eq!(requests[1].method, "PUT");
+    assert_eq!(requests[1].path, "/upload-slot");
+    assert_eq!(requests[2].path, "/v2/media-images/complete");
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[3].path, "/v2/media-images");
+    assert_eq!(requests[3].query, "cursor=CUR-1");
+    assert_eq!(requests[4].method, "DELETE");
+    assert_eq!(requests[4].path, "/v2/media-images/IMG-1/delete");
+}
