@@ -72,6 +72,7 @@ fn pairs() -> Vec<(ActionError, i64, &'static str)> {
                 http_status: 400,
                 code: Some(1),
                 message: "x".into(),
+                trace_id: None,
             }),
             120,
             "QQ_API_ERROR",
@@ -121,8 +122,11 @@ fn platform_messages_include_http_status_and_qq_code() {
         http_status: 400,
         code: Some(11244),
         message: "invalid".into(),
+        trace_id: Some("trace-1".into()),
     });
     let message = error.message();
-    assert!(message.contains("400"));
-    assert!(message.contains("11244"));
+    assert_eq!(
+        message,
+        "QQ API error (HTTP 400, code 11244, trace_id trace-1): invalid"
+    );
 }

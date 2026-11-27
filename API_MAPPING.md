@@ -223,7 +223,7 @@ HTTP POST 上报 JSON；请求头包含 `X-Self-ID`；配置了 `secret` 时还�
 | 122 | `QQ_NETWORK_ERROR` |
 | 123 | `QQ_DECODE_ERROR` |
 
-`QQ_API_ERROR` 的 `message` 包含 HTTP 状态和 QQ 错误码。`SEND_OUTCOME_UNKNOWN` 表示 QQ 可能已经接受消息但本地缓存失败，不应盲目重试。
+`QQ_API_ERROR` 与 `QQ_AUTH_ERROR` 的 `message` 原样透传 QQ 返回的 HTTP 状态、错误码、错误信息及链路追踪 `trace_id`（响应体 `trace_id` 或响应头 `X-Tps-trace-ID`）。`SEND_OUTCOME_UNKNOWN` 表示 QQ 可能已经接受消息但本地缓存失败，不应盲目重试。
 
 ## 9. 未实现的标准动作
 

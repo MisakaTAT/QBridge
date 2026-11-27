@@ -12,6 +12,8 @@ pub enum Error {
         http_status: u16,
         code: Option<i64>,
         message: String,
+        /// QQ 平台链路追踪 ID（响应体 `trace_id` 或响应头 `X-Tps-trace-ID`）。
+        trace_id: Option<String>,
     },
     /// 连接失败、超时或响应读取失败。
     Network(String),
@@ -35,6 +37,14 @@ impl Error {
     pub fn decode(message: impl Into<String>) -> Self {
         Self::Decode(message.into())
     }
+
+    /// 返回平台链路追踪 ID（如果存在）。
+    pub fn trace_id(&self) -> Option<&str> {
+        match self {
+            Self::Api { trace_id, .. } => trace_id.as_deref().filter(|id| !id.is_empty()),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -45,16 +55,28 @@ impl fmt::Display for Error {
                 http_status,
                 code,
                 message,
-            } => match code {
-                Some(code) => write!(
-                    formatter,
-                    "QQ API error (HTTP {http_status}, code {code}): {message}"
-                ),
-                None => write!(
-                    formatter,
-                    "QQ API error (HTTP {http_status}, code none): {message}"
-                ),
-            },
+                trace_id,
+            } => {
+                let trace = trace_id.as_deref().filter(|id| !id.is_empty());
+                match (code, trace) {
+                    (Some(code), Some(trace)) => write!(
+                        formatter,
+                        "QQ API error (HTTP {http_status}, code {code}, trace_id {trace}): {message}"
+                    ),
+                    (Some(code), None) => write!(
+                        formatter,
+                        "QQ API error (HTTP {http_status}, code {code}): {message}"
+                    ),
+                    (None, Some(trace)) => write!(
+                        formatter,
+                        "QQ API error (HTTP {http_status}, code none, trace_id {trace}): {message}"
+                    ),
+                    (None, None) => write!(
+                        formatter,
+                        "QQ API error (HTTP {http_status}, code none): {message}"
+                    ),
+                }
+            }
             Self::Network(message) => write!(formatter, "QQ network error: {message}"),
             Self::Decode(message) => write!(formatter, "QQ response decode error: {message}"),
         }

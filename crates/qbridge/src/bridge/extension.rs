@@ -342,7 +342,7 @@ async fn group_list(bridge: &Bridge) -> Result<Value, ActionError> {
                     http_status: 404,
                     code,
                     ..
-                }) if code != Some(11253) => return Ok(None),
+                }) if !matches!(code, Some(11253 | 11254)) => return Ok(None),
                 Err(error) => return Err(ActionError::from(error)),
             };
             Ok(Some(serde_json::json!({

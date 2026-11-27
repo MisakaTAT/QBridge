@@ -300,7 +300,7 @@ fn retryable(error: &Error) -> bool {
         Error::Network(_) => true,
         Error::Api {
             http_status, code, ..
-        } => *http_status == 429 || *http_status >= 500 || *code == Some(40093001),
+        } => *http_status == 429 || *http_status >= 500 || matches!(*code, Some(40093001 | 850027)),
         _ => false,
     }
 }
@@ -737,11 +737,7 @@ impl Client {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(Error::Api {
-                http_status: response.status().as_u16(),
-                code: None,
-                message: "chunk upload failed".into(),
-            })
+            Err(upload_put_error(response, "chunk upload failed").await)
         }
     }
 
@@ -1059,11 +1055,7 @@ impl Client {
             .await
             .map_err(|error| network_error(&error))?;
         if !response.status().is_success() {
-            return Err(Error::Api {
-                http_status: response.status().as_u16(),
-                code: None,
-                message: "markdown image upload failed".into(),
-            });
+            return Err(upload_put_error(response, "markdown image upload failed").await);
         }
         let etag = response
             .headers()
@@ -1293,6 +1285,7 @@ impl Client {
             .await
             .map_err(|error| network_error(&error))?;
         let status = response.status();
+        let header_trace_id = response_trace_id(&response);
         let bytes = read_limited(response).await?;
         if status.as_u16() == 429 || status.is_server_error() {
             return Err(Error::network(format!(
@@ -1300,13 +1293,42 @@ impl Client {
                 status.as_u16()
             )));
         }
+        let parsed = if bytes.is_empty() {
+            None
+        } else {
+            serde_json::from_slice::<Value>(&bytes).ok()
+        };
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(Error::auth("token request was rejected"));
+            let code = parsed.as_ref().and_then(business_code).filter(|c| *c != 0);
+            let message = parsed.as_ref().map(platform_message).unwrap_or_default();
+            let trace_id = parsed.as_ref().and_then(body_trace_id).or(header_trace_id);
+            return Err(Error::auth(format_auth_detail(
+                status.as_u16(),
+                code,
+                &message,
+                trace_id.as_deref(),
+            )));
         }
-        let value = serde_json::from_slice::<Value>(&bytes)
-            .map_err(|_| Error::decode("invalid token response"))?;
+        let value = parsed.ok_or_else(|| Error::decode("invalid token response"))?;
         if let Some(code) = business_code(&value).filter(|code| *code != 0) {
-            return Err(Error::auth(format!("QQ code {code}")));
+            let message = platform_message(&value);
+            let trace_id = body_trace_id(&value).or(header_trace_id);
+            return Err(Error::auth(format_auth_detail(
+                status.as_u16(),
+                Some(code),
+                &message,
+                trace_id.as_deref(),
+            )));
+        }
+        if !status.is_success() {
+            let message = platform_message(&value);
+            let trace_id = body_trace_id(&value).or(header_trace_id);
+            return Err(Error::auth(format_auth_detail(
+                status.as_u16(),
+                None,
+                &message,
+                trace_id.as_deref(),
+            )));
         }
         let response: TokenResponse =
             serde_json::from_value(value).map_err(|_| Error::decode("invalid token response"))?;
@@ -1400,28 +1422,64 @@ impl Client {
             .await
             .map_err(|error| network_error(&error))?;
         let status = response.status();
+        let header_trace_id = response_trace_id(&response);
         tracing::Span::current().record("http_status", status.as_u16());
         let bytes = read_limited(response).await?;
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            self.invalidate_token().await;
-            return Err(Error::auth(format!("HTTP {}", status.as_u16())));
-        }
-        let value = if bytes.is_empty() {
-            Value::Null
+        let parsed = if bytes.is_empty() {
+            Ok(Value::Null)
         } else {
-            serde_json::from_slice::<Value>(&bytes).map_err(|_| {
-                if status.is_success() {
-                    Error::decode("response was not JSON")
-                } else {
-                    Error::Api {
-                        http_status: status.as_u16(),
-                        code: None,
-                        message: "response was not JSON".into(),
-                    }
-                }
-            })?
+            serde_json::from_slice::<Value>(&bytes)
         };
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            self.invalidate_token().await;
+            let value = parsed.ok();
+            let code = value.as_ref().and_then(business_code).filter(|c| *c != 0);
+            let message = value.as_ref().map(platform_message).unwrap_or_default();
+            let trace_id = value.as_ref().and_then(body_trace_id).or(header_trace_id);
+            return Err(Error::auth(format_auth_detail(
+                status.as_u16(),
+                code,
+                &message,
+                trace_id.as_deref(),
+            )));
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            let value = parsed.ok();
+            let code = value.as_ref().and_then(business_code).filter(|c| *c != 0);
+            let message = value.as_ref().map(platform_message).unwrap_or_default();
+            let trace_id = value.as_ref().and_then(body_trace_id).or(header_trace_id);
+            if let Some(code) = code
+                && !token_invalid(code)
+            {
+                return Err(Error::Api {
+                    http_status: status.as_u16(),
+                    code: Some(code),
+                    message,
+                    trace_id,
+                });
+            }
+            self.invalidate_token().await;
+            return Err(Error::auth(format_auth_detail(
+                status.as_u16(),
+                code,
+                &message,
+                trace_id.as_deref(),
+            )));
+        }
+        let value = parsed.map_err(|_| {
+            if status.is_success() {
+                Error::decode("response was not JSON")
+            } else {
+                Error::Api {
+                    http_status: status.as_u16(),
+                    code: None,
+                    message: "response was not JSON".into(),
+                    trace_id: header_trace_id.clone(),
+                }
+            }
+        })?;
         let body_code = business_code(&value);
+        let trace_id = body_trace_id(&value).or(header_trace_id);
         if let Some(code) = body_code
             && code != 0
         {
@@ -1432,6 +1490,7 @@ impl Client {
                 http_status: status.as_u16(),
                 code: Some(code),
                 message: platform_message(&value),
+                trace_id,
             });
         }
         if !status.is_success() {
@@ -1439,6 +1498,7 @@ impl Client {
                 http_status: status.as_u16(),
                 code: body_code,
                 message: platform_message(&value),
+                trace_id,
             });
         }
         if bytes.is_empty() {
@@ -1557,20 +1617,91 @@ fn internal_header_error() -> Error {
     Error::auth("access token contains invalid header characters")
 }
 
+async fn upload_put_error(response: Response, fallback: &str) -> Error {
+    let http_status = response.status().as_u16();
+    let header_trace_id = response_trace_id(&response);
+    let parsed = read_limited(response)
+        .await
+        .ok()
+        .and_then(|bytes| (!bytes.is_empty()).then(|| serde_json::from_slice::<Value>(&bytes).ok()))
+        .flatten();
+    let code = parsed.as_ref().and_then(business_code).filter(|c| *c != 0);
+    let message = parsed
+        .as_ref()
+        .map(platform_message)
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| fallback.to_owned());
+    let trace_id = parsed.as_ref().and_then(body_trace_id).or(header_trace_id);
+    Error::Api {
+        http_status,
+        code,
+        message,
+        trace_id,
+    }
+}
+
+fn response_trace_id(response: &Response) -> Option<String> {
+    response
+        .headers()
+        .get("x-tps-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn body_trace_id(value: &Value) -> Option<String> {
+    value
+        .get("trace_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+fn format_auth_detail(
+    http_status: u16,
+    code: Option<i64>,
+    message: &str,
+    trace_id: Option<&str>,
+) -> String {
+    let mut detail = format!("HTTP {http_status}");
+    match (code, trace_id.filter(|id| !id.is_empty())) {
+        (Some(code), Some(trace)) => detail.push_str(&format!(" (code {code}, trace_id {trace})")),
+        (Some(code), None) => detail.push_str(&format!(" (code {code})")),
+        (None, Some(trace)) => detail.push_str(&format!(" (trace_id {trace})")),
+        (None, None) => {}
+    }
+    if !message.is_empty() {
+        detail.push_str(": ");
+        detail.push_str(message);
+    }
+    detail
+}
+
 fn business_code(value: &Value) -> Option<i64> {
-    for key in ["code", "err_code"] {
-        if let Some(raw) = value.get(key) {
-            return raw
-                .as_i64()
-                .or_else(|| raw.as_str().and_then(|text| text.parse().ok()));
+    let mut zero_seen = false;
+    for key in ["err_code", "code"] {
+        if let Some(parsed) = value.get(key).and_then(|raw| {
+            raw.as_i64()
+                .or_else(|| raw.as_str().and_then(|text| text.parse().ok()))
+        }) {
+            if parsed != 0 {
+                return Some(parsed);
+            }
+            zero_seen = true;
         }
     }
-    None
+    zero_seen.then_some(0)
 }
 
 fn platform_message(value: &Value) -> String {
     for key in ["message", "msg", "err_msg"] {
-        if let Some(message) = value.get(key).and_then(Value::as_str) {
+        if let Some(message) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty())
+        {
             return message.to_owned();
         }
     }
@@ -1578,9 +1709,10 @@ fn platform_message(value: &Value) -> String {
 }
 
 fn token_invalid(code: i64) -> bool {
+    // 官方文档 token/appid 校验错误码（11241-11243, 11251, 100007, 100016）及历史兼容码。
     matches!(
         code,
-        40014 | 42001 | 11241 | 11242 | 11243 | 11244 | 11245 | 100007 | 100016
+        40014 | 42001 | 11241 | 11242 | 11243 | 11244 | 11245 | 11251 | 100007 | 100016
     )
 }
 

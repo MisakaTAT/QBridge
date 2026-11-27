@@ -20,11 +20,17 @@ use std::{
 #[derive(Clone)]
 struct Fake(Arc<Mutex<FakeState>>);
 
+struct FakeResponse {
+    status: u16,
+    body: Option<Value>,
+    headers: Vec<(String, String)>,
+}
+
 struct FakeState {
     token_calls: usize,
     token_status: u16,
     token_body: Value,
-    responses: VecDeque<(u16, Option<Value>)>,
+    responses: VecDeque<FakeResponse>,
     requests: Vec<Recorded>,
 }
 
@@ -50,15 +56,30 @@ impl Fake {
     }
 
     fn respond(&self, status: u16, body: Value) {
-        self.0
-            .lock()
-            .unwrap()
-            .responses
-            .push_back((status, Some(body)));
+        self.0.lock().unwrap().responses.push_back(FakeResponse {
+            status,
+            body: Some(body),
+            headers: Vec::new(),
+        });
+    }
+
+    fn respond_with_headers(&self, status: u16, body: Value, headers: Vec<(&str, &str)>) {
+        self.0.lock().unwrap().responses.push_back(FakeResponse {
+            status,
+            body: Some(body),
+            headers: headers
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        });
     }
 
     fn respond_empty(&self, status: u16) {
-        self.0.lock().unwrap().responses.push_back((status, None));
+        self.0.lock().unwrap().responses.push_back(FakeResponse {
+            status,
+            body: None,
+            headers: Vec::new(),
+        });
     }
 
     fn set_token(&self, status: u16, body: Value) {
@@ -94,7 +115,7 @@ async fn handle(State(fake): State<Fake>, request: Request<Body>) -> Response {
         let status = state.token_status;
         let body = state.token_body.clone();
         drop(state);
-        return json_response(status, Some(body));
+        return json_response(status, Some(body), &[]);
     }
     let body: Value = if bytes.is_empty() {
         Value::Null
@@ -110,26 +131,27 @@ async fn handle(State(fake): State<Fake>, request: Request<Body>) -> Response {
         body,
         raw: bytes.to_vec(),
     });
-    let response = state
-        .responses
-        .pop_front()
-        .unwrap_or((404, Some(json!({"code": 404}))));
+    let response = state.responses.pop_front().unwrap_or(FakeResponse {
+        status: 404,
+        body: Some(json!({"code": 404})),
+        headers: Vec::new(),
+    });
     drop(state);
-    json_response(response.0, response.1)
+    json_response(response.status, response.body, &response.headers)
 }
 
-fn json_response(status: u16, body: Option<Value>) -> Response {
+fn json_response(status: u16, body: Option<Value>, headers: &[(String, String)]) -> Response {
     let status = StatusCode::from_u16(status).unwrap();
+    let mut builder = Response::builder().status(status);
+    for (name, value) in headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
     match body {
-        Some(body) => Response::builder()
-            .status(status)
+        Some(body) => builder
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap(),
-        None => Response::builder()
-            .status(status)
-            .body(Body::empty())
-            .unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
     }
 }
 
@@ -380,10 +402,12 @@ async fn reports_api_error_with_status_and_code() {
             http_status,
             code,
             message,
+            trace_id,
         } => {
             assert_eq!(*http_status, 400);
             assert_eq!(*code, Some(11244));
             assert_eq!(message, "invalid request");
+            assert_eq!(trace_id.as_deref(), None);
         }
         other => panic!("unexpected error: {other:?}"),
     }
@@ -772,4 +796,131 @@ async fn lists_uploads_and_deletes_media_images() {
     assert_eq!(requests[3].query, "cursor=CUR-1");
     assert_eq!(requests[4].method, "DELETE");
     assert_eq!(requests[4].path, "/v2/media-images/IMG-1/delete");
+}
+
+#[tokio::test]
+async fn passes_through_trace_id_and_http_401_403_raw_details() {
+    let service = service().await;
+    let client = service.client();
+
+    // 1) 响应体 trace_id 原样透传
+    service.fake.respond(
+        400,
+        json!({
+            "err_code": 40034005,
+            "message": "回复消息msg_id已过期",
+            "trace_id": "body-trace-001"
+        }),
+    );
+    let err = client
+        .send_message(&Peer::Group(group()), &OutgoingMessage::text("hi"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.trace_id(), Some("body-trace-001"));
+    assert_eq!(
+        err.to_string(),
+        "QQ API error (HTTP 400, code 40034005, trace_id body-trace-001): 回复消息msg_id已过期"
+    );
+
+    // 2) HTTP 403 携带非 token 业务错误码（如 11253）：原样返回 Error::Api，不丢码也不清 token，且提取 X-Tps-trace-ID
+    service.fake.respond_with_headers(
+        403,
+        json!({
+            "err_code": 11253,
+            "message": "check app privilege not pass"
+        }),
+        vec![("X-Tps-trace-ID", "header-trace-002")],
+    );
+    let perm_err = client.group_info(&group()).await.unwrap_err();
+    assert!(matches!(
+        &perm_err,
+        Error::Api {
+            http_status: 403,
+            code: Some(11253),
+            message,
+            trace_id: Some(trace_id),
+        } if message == "check app privilege not pass" && trace_id == "header-trace-002"
+    ));
+    assert_eq!(service.fake.token_calls(), 1);
+
+    // 3) HTTP 401 携带业务码与 message：仍判为 Auth 并清 token，但原样保留 code/message/trace_id
+    service.fake.respond(
+        401,
+        json!({
+            "err_code": 11243,
+            "message": "check token not pass",
+            "trace_id": "trace-401"
+        }),
+    );
+    let auth_err = client.group_info(&group()).await.unwrap_err();
+    assert!(auth_err.is_auth(), "{auth_err:?}");
+    let auth_text = auth_err.to_string();
+    assert!(auth_text.contains("HTTP 401"));
+    assert!(auth_text.contains("11243"));
+    assert!(auth_text.contains("check token not pass"));
+    assert!(auth_text.contains("trace-401"));
+
+    // 下次请求会重新获取 token
+    service.fake.respond(200, json!({"group_name": "G"}));
+    client.group_info(&group()).await.unwrap();
+    assert_eq!(service.fake.token_calls(), 2);
+}
+
+#[tokio::test]
+async fn passes_through_token_endpoint_and_err_code_priority() {
+    let service = service().await;
+
+    // token 接口 401 保留原始 code / message / trace_id
+    service.fake.set_token(
+        401,
+        json!({
+            "code": 100016,
+            "message": "invalid appid or secret",
+            "trace_id": "tok-trace-1"
+        }),
+    );
+    let err = service.client().access_token().await.unwrap_err();
+    assert!(err.is_auth(), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("100016"));
+    assert!(text.contains("invalid appid or secret"));
+    assert!(text.contains("tok-trace-1"));
+
+    // token 接口 200 带非 0 code 保留原始 message
+    service
+        .fake
+        .set_token(200, json!({"code": 10004, "message": "机器人不存在"}));
+    let err = service.client().access_token().await.unwrap_err();
+    assert!(err.is_auth(), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("10004"));
+    assert!(text.contains("机器人不存在"));
+
+    // 正常响应中 code=0 但 err_code!=0、message="" 但 err_msg 非空时，优先取非零 err_code 与非空 err_msg
+    service
+        .fake
+        .set_token(200, json!({"access_token": "TOKEN", "expires_in": 7200}));
+    service.fake.respond(
+        400,
+        json!({
+            "code": 0,
+            "err_code": 40034005,
+            "message": "",
+            "err_msg": "msg_id expired"
+        }),
+    );
+    let err = service
+        .client()
+        .send_message(&Peer::Group(group()), &OutgoingMessage::text("x"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        &err,
+        Error::Api {
+            http_status: 400,
+            code: Some(40034005),
+            message,
+            ..
+        } if message == "msg_id expired"
+    ));
 }
