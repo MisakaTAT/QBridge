@@ -17,17 +17,21 @@
 | --- | --- | --- |
 | `send_private_msg` | 支持 | 单聊发送；`user_id` 必填 |
 | `send_group_msg` | 支持 | 群聊发送；`group_id` 必填 |
+| `send_to_group` | 支持扩展 | `send_group_msg` 兼容别名 |
+| `send_private_msg_wakeup` | 支持扩展 | C2C 互动召回消息（等价于 `send_private_msg` 附加 `[CQ:wakeup]`） |
 | `send_msg` | 支持 | 按 `message_type` 或传入的 `user_id`/`group_id` 选择场景 |
 | `send_private_forward_msg` | 支持扩展 | `messages` 为 node 数组，渲染为一条 Markdown |
 | `send_group_forward_msg` | 支持扩展 | 同上 |
 | `send_forward_msg` | 支持扩展 | 同上，按 `message_type` 或目标字段决定场景 |
 | `delete_msg` | 支持 | 可撤回机器人消息；群聊中可撤回已缓存的群成员消息，需要机器人有对应权限 |
+| `delete_group_msg` | 支持扩展 | 撤回已缓存的群聊消息（可选校验 `group_id`） |
 | `get_msg` | 支持 | 返回本地缓存的消息事件；过期或不存在返回 `MESSAGE_NOT_CACHED` |
 | `get_image` | 支持 | 只查询入站消息缓存中的图片 URL；不下载文件 |
 | `get_group_info` | 支持 | 调用 QQ 群信息接口 |
 | `get_group_member_info` | 支持 | 调用 QQ 群成员接口；需要群成员接口权限 |
 | `get_group_member_list` | 支持 | 按 QQ `next_cursor` 翻页聚合，批量解析身份并写入 profile 缓存 |
 | `set_group_ban` | 支持 | `duration` 秒；0 表示解除禁言 |
+| `get_group_ban` | 支持扩展 | 查询群禁言设置，并把成员 OpenID 映射为本地 `user_id` |
 | `set_group_kick` | 支持 | 调用 QQ 批量移除成员接口；`reject_add_request` / `add_blacklist` 可同步加入黑名单 |
 | `set_group_add_request` | 支持 | 仅支持 `sub_type=add`；`flag` 由 QBridge 生成，原样回传即可 |
 | `put_interaction` | 支持扩展 | 回应互动事件：`interaction_id`、`code` |
@@ -90,6 +94,7 @@ OneBot v11 的 38 个标准动作名中，QBridge 没有实现的会返回 `UNSU
 | `file` | 单个 | 同上；QQ 文件类型为文件（4），`name` 可覆盖文件名 |
 | `card` | 单个 | 群聊图文卡片（`msg_type=8`）；需要 `pic` 和 `url` |
 | `input_notify` | 单个 | 单聊输入状态（`msg_type=6`）；`type` 默认 1，`second` 默认 60；不产生可缓存消息，成功返回 `message_id=0` |
+| `active` | 修饰段 | 主动发送标记（等价于动作参数 `active=true`），省略被动回复上下文，不能与 `reply` 同用 |
 | `wakeup` | 修饰段 | C2C 互动召回；标记 `is_wakeup=true`，要求单聊目标 |
 | `stream` | 单个 | 单聊流式消息 `start`/`mid`/`finish`，按用户串行化发送；`start` 必须带被动回复上下文，`mid`/`finish` 复用同一 `msg_id`/`msg_seq` 和 `stream_msg_id` 并同步刷新本地缓存全文；空闲超过 `cache.stream_ttl_secs` 后自动过期清理 |
 | `avatar` | 内容展开 | 按 `user_id` 展开为 QQ 头像直链 |

@@ -1157,6 +1157,12 @@ impl Client {
             .await
     }
 
+    /// 查询群禁言设置。
+    pub async fn group_mute_setting(&self, group: &GroupOpenId) -> Result<Value, Error> {
+        self.request(Method::GET, GROUP_MUTE, &[group.as_str()], &[], None)
+            .await
+    }
+
     /// 批量设置群成员禁言状态。
     pub async fn set_member_mute(&self, group: &GroupOpenId, ops: &[MuteOp]) -> Result<(), Error> {
         if ops.is_empty() {

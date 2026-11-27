@@ -124,6 +124,7 @@ pub fn plan(
     extra: &Map<String, Value>,
 ) -> Result<Plan, ActionError> {
     let mut active = flag(extra, "active")?.unwrap_or(false);
+    let mut active_segment = false;
     let mut text = Vec::new();
     let mut media: Option<MediaPlan> = None;
     let mut markdown: Option<Markdown> = None;
@@ -248,6 +249,15 @@ pub fn plan(
                         .unwrap_or("group_name")
                         .to_owned(),
                 });
+            }
+            Segment::Other { kind, .. } if kind == "active" => {
+                if active_segment {
+                    return Err(ActionError::Unsupported(
+                        UnsupportedKind::MessageCombination,
+                    ));
+                }
+                active_segment = true;
+                active = true;
             }
             Segment::Other { kind, data } if kind == "wakeup" => {
                 if stream.is_some()

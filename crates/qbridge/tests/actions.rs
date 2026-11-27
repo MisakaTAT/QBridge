@@ -723,3 +723,106 @@ async fn manages_custom_menu_and_panels() {
     assert_eq!(requests[7].path, "/v2/panels/P/target");
     assert_eq!(requests[7].body["op"], "add");
 }
+
+#[tokio::test]
+async fn supports_compatible_send_recall_and_group_ban_query_extensions() {
+    let service = service().await;
+    let store = memory_store();
+    let group = store.identity(IdentityKind::Group, "GROUP").await.unwrap();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let member = store
+        .identity(IdentityKind::Member, "MEMBER")
+        .await
+        .unwrap();
+    let private_msg = store
+        .save_outbound(
+            Conversation::Private(user),
+            "P-OUT",
+            now(),
+            now() + 1000,
+            &message_event("private", user, "priv", now()),
+            None,
+        )
+        .await
+        .unwrap();
+    let group_msg = store
+        .save_inbound(
+            Conversation::Group(group),
+            "G-IN",
+            now(),
+            now() + 1000,
+            &message_event("group", group, "grp", now()),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let bridge = service.bridge(store.clone());
+
+    service.fake.respond(200, json!({"id": "SENT-G"}));
+    let sent_group = run(
+        &bridge,
+        "send_to_group",
+        json!({"group_id": group, "message": "[CQ:active]hello group"}),
+    )
+    .await
+    .unwrap();
+    assert!(sent_group["message_id"].as_i64().unwrap() > 0);
+
+    service.fake.respond(200, json!({"id": "SENT-W"}));
+    let sent_wakeup = run(
+        &bridge,
+        "send_private_msg_wakeup",
+        json!({"user_id": user, "message": "wake up"}),
+    )
+    .await
+    .unwrap();
+    assert!(sent_wakeup["message_id"].as_i64().unwrap() > 0);
+
+    service.fake.respond(200, json!({}));
+    run(
+        &bridge,
+        "delete_group_msg",
+        json!({"group_id": group, "message_id": group_msg}),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        run(
+            &bridge,
+            "delete_group_msg",
+            json!({"message_id": private_msg})
+        )
+        .await,
+        Err(ActionError::BadParam(_))
+    ));
+
+    service.fake.respond(
+        200,
+        json!({
+            "members": [{"member_openid": "MEMBER", "mute_end_timestamp": "2099-01-01T00:00:00Z"}]
+        }),
+    );
+    let ban = run(&bridge, "get_group_ban", json!({"group_id": group}))
+        .await
+        .unwrap();
+    assert_eq!(ban["group_id"], group);
+    assert_eq!(ban["members"][0]["user_id"], member);
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].path, "/v2/groups/GROUP/messages");
+    assert_eq!(requests[0].body["content"], "hello group");
+    assert!(requests[0].body.get("msg_id").is_none());
+
+    assert_eq!(requests[1].path, "/v2/users/USER/messages");
+    assert_eq!(requests[1].body["content"], "wake up");
+    assert_eq!(requests[1].body["is_wakeup"], true);
+
+    assert_eq!(requests[2].method, "DELETE");
+    assert_eq!(requests[2].path, "/v2/groups/GROUP/messages/G-IN");
+    assert_eq!(requests[2].query, "hidetip=true");
+
+    assert_eq!(requests[3].method, "GET");
+    assert_eq!(requests[3].path, "/v2/groups/GROUP/restrict_chat_setting");
+}

@@ -4,13 +4,16 @@ use crate::{
     bridge::{
         Bridge,
         group::{group_openid, join_flag, member_openid},
-        send,
+        query, send,
     },
     error::{ActionError, NotFoundKind},
-    store::IdentityKind,
+    store::{Conversation, IdentityKind},
 };
 use futures_util::{StreamExt, TryStreamExt, stream};
-use qbridge_ob11::{Message, Target, action::SendMsg};
+use qbridge_ob11::{
+    Action, Message, Segment, Target,
+    action::{MessageRef, SendMsg},
+};
 use serde_json::{Map, Value};
 
 pub async fn execute(
@@ -23,6 +26,10 @@ pub async fn execute(
         "send_private_forward_msg" | "send_group_forward_msg" | "send_forward_msg" => {
             forward(bridge, name, params, now).await
         }
+        "send_to_group" => send_to_group(bridge, params, now).await,
+        "send_private_msg_wakeup" => send_private_msg_wakeup(bridge, params, now).await,
+        "delete_group_msg" => delete_group_msg(bridge, params).await,
+        "get_group_ban" => group_ban(bridge, params).await,
         "put_interaction" => put_interaction(bridge, params).await,
         "get_group_join_request_list" => join_request_list(bridge, params).await,
         "get_group_bot_state" => bot_state(bridge, params).await,
@@ -575,4 +582,105 @@ async fn set_panel_target(
         .set_panel_target(&id, &Value::Object(params))
         .await?;
     Ok(Value::Null)
+}
+
+async fn send_to_group(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+    now: i64,
+) -> Result<Value, ActionError> {
+    let Action::SendMsg(request) = Action::parse("send_group_msg", params)? else {
+        return Err(ActionError::BadParam(
+            "invalid send_to_group parameters".into(),
+        ));
+    };
+    send::send(bridge, request, now).await
+}
+
+async fn send_private_msg_wakeup(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+    now: i64,
+) -> Result<Value, ActionError> {
+    let Action::SendMsg(mut request) = Action::parse("send_private_msg", params)? else {
+        return Err(ActionError::BadParam(
+            "invalid send_private_msg_wakeup parameters".into(),
+        ));
+    };
+    let has_wakeup = request
+        .message
+        .0
+        .iter()
+        .any(|segment| matches!(segment, Segment::Other { kind, .. } if kind == "wakeup"));
+    if !has_wakeup {
+        request.message.0.push(Segment::Other {
+            kind: "wakeup".into(),
+            data: Map::new(),
+        });
+    }
+    send::send(bridge, request, now).await
+}
+
+async fn delete_group_msg(
+    bridge: &Bridge,
+    params: Map<String, Value>,
+) -> Result<Value, ActionError> {
+    let raw_id = integer(&params, "message_id")?;
+    let message_id = i32::try_from(raw_id)
+        .map_err(|_| ActionError::BadParam("message_id must be an int32".into()))?;
+    let expected_group = if params.get("group_id").is_some_and(|value| !value.is_null()) {
+        Some(integer(&params, "group_id")?)
+    } else {
+        None
+    };
+    let target = bridge.store.recall_target(message_id).await?;
+    match target.conversation {
+        Conversation::Group(group_id) => {
+            if let Some(expected) = expected_group
+                && expected != group_id
+            {
+                return Err(ActionError::BadParam(
+                    "message does not belong to the target group".into(),
+                ));
+            }
+        }
+        Conversation::Private(_) => {
+            return Err(ActionError::BadParam(
+                "delete_group_msg only supports group messages".into(),
+            ));
+        }
+    }
+    query::delete_msg(bridge, MessageRef { message_id }).await
+}
+
+async fn group_ban(bridge: &Bridge, params: Map<String, Value>) -> Result<Value, ActionError> {
+    let group_id = integer(&params, "group_id")?;
+    let group = group_openid(bridge, group_id).await?;
+    let mut response = bridge.qq.group_mute_setting(&group).await?;
+    let members = response
+        .get("members")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !members.is_empty() {
+        let mut mapped = Vec::with_capacity(members.len());
+        for mut member in members {
+            if let Some(openid) = member
+                .get("member_openid")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                let user_id = bridge.store.identity(IdentityKind::Member, &openid).await?;
+                if let Value::Object(object) = &mut member {
+                    object.insert("user_id".into(), user_id.into());
+                }
+            }
+            mapped.push(member);
+        }
+        response["members"] = Value::Array(mapped);
+    }
+    if let Value::Object(object) = &mut response {
+        object.insert("group_id".into(), group_id.into());
+    }
+    Ok(response)
 }

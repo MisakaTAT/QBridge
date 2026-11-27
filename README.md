@@ -130,6 +130,7 @@ flowchart LR
 - [x] `[CQ:card]`
 - [x] `[CQ:input_notify]`
 - [x] `[CQ:stream]`
+- [x] `[CQ:active]`
 - [x] `[CQ:wakeup]`
 - [x] `[CQ:avatar]`
 - [x] `[CQ:group_info]`
@@ -190,6 +191,10 @@ flowchart LR
 
 扩展动作：
 
+- [x] `send_to_group`
+- [x] `send_private_msg_wakeup`
+- [x] `delete_group_msg`
+- [x] `get_group_ban`
 - [x] `send_private_forward_msg`
 - [x] `send_group_forward_msg`
 - [x] `send_forward_msg`

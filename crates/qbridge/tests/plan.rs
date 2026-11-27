@@ -384,6 +384,51 @@ fn plans_file_card_input_and_wakeup_segments() {
     assert!(wakeup.wakeup);
     assert!(wakeup.active);
     assert!(matches!(wakeup.body, Body::Text(_)));
+
+    let active = plan_message(
+        Message(vec![
+            other("active", json!({"type": "text"})),
+            Segment::Text("broadcast".into()),
+        ]),
+        json!({}),
+    )
+    .unwrap();
+    assert!(active.active);
+    assert_eq!(
+        active.body,
+        Body::Text(vec![TextPart::Text("broadcast".into())])
+    );
+
+    assert_eq!(
+        plan_message(
+            Message(vec![
+                other("active", json!({})),
+                Segment::Reply(1),
+                Segment::Text("conflict".into()),
+            ]),
+            json!({}),
+        )
+        .unwrap_err(),
+        ActionError::Unsupported(UnsupportedKind::MessageCombination)
+    );
+
+    assert_eq!(
+        plan_message(
+            Message(vec![
+                other("active", json!({})),
+                other("active", json!({})),
+                Segment::Text("dup".into()),
+            ]),
+            json!({}),
+        )
+        .unwrap_err(),
+        ActionError::Unsupported(UnsupportedKind::MessageCombination)
+    );
+
+    assert!(matches!(
+        plan_message(Message(vec![other("active", json!({}))]), json!({})).unwrap_err(),
+        ActionError::BadParam(_)
+    ));
 }
 
 #[test]

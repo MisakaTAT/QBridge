@@ -673,3 +673,17 @@ async fn gateway_bot_defaults_shards_and_rejects_invalid_values() {
         Err(Error::Decode(_))
     ));
 }
+
+#[tokio::test]
+async fn queries_group_mute_setting() {
+    let service = service().await;
+    service.fake.respond(
+        200,
+        json!({"members": [{"member_openid": "M1", "mute_end_timestamp": "2099-01-01T00:00:00Z"}]}),
+    );
+    let response = service.client().group_mute_setting(&group()).await.unwrap();
+    assert_eq!(response["members"][0]["member_openid"], "M1");
+    let request = service.fake.requests().remove(0);
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, "/v2/groups/GROUP1/restrict_chat_setting");
+}
