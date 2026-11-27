@@ -826,3 +826,53 @@ async fn supports_compatible_send_recall_and_group_ban_query_extensions() {
     assert_eq!(requests[3].method, "GET");
     assert_eq!(requests[3].path, "/v2/groups/GROUP/restrict_chat_setting");
 }
+
+#[tokio::test]
+async fn fetches_bot_profile_lazily_and_serves_stranger_info() {
+    let service = service().await;
+    let store = memory_store();
+    let user = store.identity(IdentityKind::User, "USER").await.unwrap();
+    let bridge = service.bridge(store.clone());
+
+    service
+        .fake
+        .respond(200, json!({"id": "BOT-99", "username": "WebhookBot"}));
+    let login = run(&bridge, "get_login_info", json!({})).await.unwrap();
+    assert_eq!(login["nickname"], "WebhookBot");
+    assert_eq!(bridge.state().bot_id().await.as_deref(), Some("BOT-99"));
+
+    service.fake.respond(
+        200,
+        json!({"nickname": "Alice", "avatar": "https://example.com/alice.png"}),
+    );
+    let stranger = run(&bridge, "get_stranger_info", json!({"user_id": user}))
+        .await
+        .unwrap();
+    assert_eq!(stranger["user_id"], user);
+    assert_eq!(stranger["nickname"], "Alice");
+    assert_eq!(stranger["avatar"], "https://example.com/alice.png");
+
+    let cached = run(&bridge, "get_stranger_info", json!({"user_id": user}))
+        .await
+        .unwrap();
+    assert_eq!(cached["nickname"], "Alice");
+    assert_eq!(cached["local_cache"], true);
+
+    service.fake.respond(
+        200,
+        json!({"nickname": "Alice2", "avatar": "https://example.com/alice2.png"}),
+    );
+    let refreshed = run(
+        &bridge,
+        "get_stranger_info",
+        json!({"user_id": user, "no_cache": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refreshed["nickname"], "Alice2");
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].path, "/users/@me");
+    assert_eq!(requests[1].path, "/v2/users/USER/info");
+    assert_eq!(requests[2].path, "/v2/users/USER/info");
+}

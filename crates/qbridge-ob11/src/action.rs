@@ -107,6 +107,7 @@ pub enum Action {
     GetGroupInfo(GetGroupInfo),
     GetGroupMemberInfo(GetGroupMemberInfo),
     GetGroupMemberList(GetGroupMemberList),
+    GetStrangerInfo(GetStrangerInfo),
     SetGroupBan(SetGroupBan),
     SetGroupKick(SetGroupKick),
     SetGroupAddRequest(SetGroupAddRequest),
@@ -140,6 +141,7 @@ impl Action {
             "get_group_info" => Self::GetGroupInfo(from_params(params)?),
             "get_group_member_info" => Self::GetGroupMemberInfo(from_params(params)?),
             "get_group_member_list" => Self::GetGroupMemberList(from_params(params)?),
+            "get_stranger_info" => Self::GetStrangerInfo(from_params(params)?),
             "set_group_ban" => Self::SetGroupBan(from_params(params)?),
             "set_group_kick" => Self::SetGroupKick(from_params(params)?),
             "set_group_add_request" => Self::SetGroupAddRequest(from_params(params)?),
@@ -265,6 +267,14 @@ pub struct GetGroupMemberInfo {
 pub struct GetGroupMemberList {
     #[serde(deserialize_with = "lenient::int")]
     pub group_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GetStrangerInfo {
+    #[serde(deserialize_with = "lenient::int")]
+    pub user_id: i64,
+    #[serde(default, deserialize_with = "lenient::boolean")]
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

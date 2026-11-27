@@ -3,8 +3,9 @@
 use crate::{
     bridge::Bridge,
     error::{ActionError, NotFoundKind},
+    store::IdentityKind,
 };
-use qbridge_ob11::action::MessageRef;
+use qbridge_ob11::action::{GetStrangerInfo, MessageRef};
 use serde_json::{Value, json};
 
 pub async fn get_msg(bridge: &Bridge, request: MessageRef, now: i64) -> Result<Value, ActionError> {
@@ -77,9 +78,65 @@ pub async fn get_image(bridge: &Bridge, file: &str, now: i64) -> Result<Value, A
 }
 
 pub async fn login_info(bridge: &Bridge) -> Result<Value, ActionError> {
+    if !bridge.state.has_profile()
+        && let Err(error) = bridge.sync_bot_profile().await
+    {
+        tracing::debug!(reason = %error.message(), "cannot fetch bot profile from /users/@me");
+    }
     Ok(json!({
         "user_id": bridge.self_id,
         "nickname": bridge.state.nickname().await
+    }))
+}
+
+pub async fn stranger_info(
+    bridge: &Bridge,
+    request: GetStrangerInfo,
+    now: i64,
+) -> Result<Value, ActionError> {
+    let openid = bridge
+        .store
+        .openid(IdentityKind::User, request.user_id)
+        .await?
+        .ok_or(ActionError::NotFound(NotFoundKind::UnknownTarget))?;
+    if !request.no_cache
+        && let Some(profile) = bridge.store.profile(request.user_id, now).await?
+        && !profile.display_name.is_empty()
+    {
+        return Ok(json!({
+            "user_id": request.user_id,
+            "nickname": profile.display_name,
+            "sex": "unknown",
+            "age": 0,
+            "avatar": profile.avatar_url,
+            "local_cache": true,
+        }));
+    }
+    let user = qbridge_qq::UserOpenId::new(openid)
+        .map_err(|_| ActionError::NotFound(NotFoundKind::UnknownTarget))?;
+    let info = bridge.qq.user_info(&user).await?;
+    let nickname = info.display_name().unwrap_or_default().to_owned();
+    let avatar = info.avatar.clone().unwrap_or_default();
+    if !nickname.is_empty() || !avatar.is_empty() {
+        bridge
+            .store
+            .save_profile(
+                request.user_id,
+                &nickname,
+                "",
+                &avatar,
+                bridge.cache.profile_ttl_secs,
+                now,
+            )
+            .await?;
+    }
+    Ok(json!({
+        "user_id": request.user_id,
+        "nickname": nickname,
+        "sex": "unknown",
+        "age": 0,
+        "avatar": avatar,
+        "qq": info,
     }))
 }
 

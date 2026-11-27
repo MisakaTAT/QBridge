@@ -19,9 +19,9 @@ pub use dispatch::{Dispatch, Envelope};
 pub use error::Error;
 pub use gateway::{GatewayConfig, GatewayStream, Session, SessionStore, Shard, ShardConfig};
 pub use message::{
-    Card, CardContent, GroupInfo, Keyboard, KeyboardContent, Markdown, MarkdownParam, MediaSource,
-    MediaUpload, Member, MemberPage, MessageReference, MuteOp, OutgoingMessage, SentMessage,
-    UploadedMedia,
+    BotProfile, Card, CardContent, GroupInfo, Keyboard, KeyboardContent, Markdown, MarkdownParam,
+    MediaSource, MediaUpload, Member, MemberPage, MessageReference, MuteOp, OutgoingMessage,
+    SentMessage, UploadedMedia, UserInfo,
 };
 pub use openid::{GroupOpenId, MemberOpenId, OpenIdError, Peer, UserOpenId};
 pub use webhook::{Webhook, WebhookConfig, WebhookStream};

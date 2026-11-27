@@ -322,6 +322,47 @@ pub struct SentExtInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BotProfile {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub bot: Option<bool>,
+    #[serde(default)]
+    pub share_url: Option<String>,
+    #[serde(default)]
+    pub welcome_msg: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserInfo {
+    #[serde(default)]
+    pub user_openid: Option<String>,
+    #[serde(default)]
+    pub nickname: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl UserInfo {
+    pub fn display_name(&self) -> Option<&str> {
+        self.nickname
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .or_else(|| self.username.as_deref().filter(|name| !name.is_empty()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupInfo {
     #[serde(default)]
     pub group_openid: Option<String>,

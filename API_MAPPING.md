@@ -52,7 +52,8 @@
 | `join_approval_strategy_delete` | 支持扩展 | 删除策略 |
 | `get_custom_menu` / `set_custom_menu` | 支持扩展 | C2C 自定义菜单读取/覆盖设置 |
 | `get_panel_list` / `create_panel` / `get_panel` / `set_panel` / `delete_panel` / `set_panel_target` | 支持扩展 | 指令面板管理；`get_panel_list` 必须传 `scope=c2c/group/channel/dm` |
-| `get_login_info` | 支持 | 返回配置的 `self_id` 与 Gateway `READY` 中的机器人昵称 |
+| `get_stranger_info` | 支持 | 优先读取未过期 `profile_cache`（`no_cache=true` 跳过缓存），未命中时调用 `GET /v2/users/{user_openid}/info` |
+| `get_login_info` | 支持 | 返回配置的 `self_id` 与机器人昵称（Gateway 来自 `READY`，Webhook 等场景首次调用按需拉取 `GET /users/@me`） |
 | `get_status` | 支持 | `online`/`good` 来自 QQ 事件源连接状态；`identity` 返回缓存/批量/profile/绑定等计数 |
 | `get_version_info` | 支持 | `app_name=qbridge`、`protocol_version=v11` |
 | `can_send_image` | 支持 | 固定返回 `{"yes": true}` |
@@ -237,7 +238,6 @@ HTTP POST 上报 JSON；请求头包含 `X-Self-ID`；配置了 `secret` 时还�
 - `set_group_leave`
 - `set_group_special_title`
 - `set_friend_add_request`
-- `get_stranger_info`
 - `get_group_honor_info`
 - `get_cookies`
 - `get_csrf_token`

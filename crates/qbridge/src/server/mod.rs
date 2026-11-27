@@ -510,6 +510,7 @@ pub(crate) fn action_name(action: &Action) -> &str {
         Action::GetGroupInfo(_) => "get_group_info",
         Action::GetGroupMemberInfo(_) => "get_group_member_info",
         Action::GetGroupMemberList(_) => "get_group_member_list",
+        Action::GetStrangerInfo(_) => "get_stranger_info",
         Action::SetGroupBan(_) => "set_group_ban",
         Action::SetGroupKick(_) => "set_group_kick",
         Action::SetGroupAddRequest(_) => "set_group_add_request",

@@ -29,6 +29,7 @@ pub struct BotState {
     online: Arc<AtomicBool>,
     nickname: RwLock<String>,
     bot_id: RwLock<Option<String>>,
+    has_profile: AtomicBool,
 }
 
 impl BotState {
@@ -37,6 +38,7 @@ impl BotState {
             online,
             nickname: RwLock::new("QQ Official Bot".into()),
             bot_id: RwLock::new(None),
+            has_profile: AtomicBool::new(false),
         }
     }
 
@@ -48,12 +50,17 @@ impl BotState {
         self.online.clone()
     }
 
+    pub fn has_profile(&self) -> bool {
+        self.has_profile.load(Ordering::Acquire)
+    }
+
     pub async fn nickname(&self) -> String {
         self.nickname.read().await.clone()
     }
 
     pub async fn set_nickname(&self, nickname: impl Into<String>) {
         *self.nickname.write().await = nickname.into();
+        self.has_profile.store(true, Ordering::Release);
     }
 
     pub async fn bot_id(&self) -> Option<String> {
@@ -62,6 +69,7 @@ impl BotState {
 
     pub async fn set_bot_id(&self, id: impl Into<String>) {
         *self.bot_id.write().await = Some(id.into());
+        self.has_profile.store(true, Ordering::Release);
     }
 }
 
@@ -202,6 +210,18 @@ impl Bridge {
         &self.state
     }
 
+    /// 主动拉取机器人自身资料并更新本地状态（Webhook 模式下用于补齐昵称与自身 ID）。
+    pub async fn sync_bot_profile(&self) -> Result<qbridge_qq::BotProfile, ActionError> {
+        let profile = self.qq.me().await?;
+        if !profile.username.is_empty() {
+            self.state.set_nickname(profile.username.clone()).await;
+        }
+        if !profile.id.is_empty() {
+            self.state.set_bot_id(profile.id.clone()).await;
+        }
+        Ok(profile)
+    }
+
     pub async fn execute(&self, action: Action) -> Result<Value, ActionError> {
         match action {
             Action::HandleQuickOperation(operation) => self.quick_operation(operation).await,
@@ -219,6 +239,7 @@ impl Bridge {
             Action::GetGroupInfo(request) => group::info(self, request).await,
             Action::GetGroupMemberInfo(request) => group::member(self, request).await,
             Action::GetGroupMemberList(request) => group::members(self, request).await,
+            Action::GetStrangerInfo(request) => query::stranger_info(self, request, now).await,
             Action::SetGroupBan(request) => group::ban(self, request, now).await,
             Action::SetGroupKick(request) => group::kick(self, request).await,
             Action::SetGroupAddRequest(request) => group::add_request(self, request).await,

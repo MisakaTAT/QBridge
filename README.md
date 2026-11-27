@@ -158,6 +158,7 @@ flowchart LR
 - [x] `get_group_list`
 - [x] `get_group_member_info`
 - [x] `get_group_member_list`
+- [x] `get_stranger_info`
 - [x] `get_friend_list`
 - [x] `set_group_ban`
 - [x] `set_group_kick`
@@ -182,7 +183,6 @@ flowchart LR
 - [ ] `set_group_leave`
 - [ ] `set_group_special_title`
 - [ ] `set_friend_add_request`
-- [ ] `get_stranger_info`
 - [ ] `get_group_honor_info`
 - [ ] `get_cookies`
 - [ ] `get_csrf_token`

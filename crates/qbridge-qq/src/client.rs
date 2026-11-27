@@ -6,8 +6,8 @@
 use crate::{
     error::Error,
     message::{
-        GroupInfo, MediaUpload, Member, MemberPage, MuteOp, OutgoingMessage, SentMessage,
-        UploadedMedia,
+        BotProfile, GroupInfo, MediaUpload, Member, MemberPage, MuteOp, OutgoingMessage,
+        SentMessage, UploadedMedia, UserInfo,
     },
     openid::{GroupOpenId, MemberOpenId, Peer, UserOpenId},
     redact,
@@ -40,6 +40,8 @@ const BODY_LIMIT: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 
+const BOT_ME: &str = "/users/@me";
+const USER_INFO: &str = "/v2/users/{user_openid}/info";
 const USER_MESSAGES: &str = "/v2/users/{openid}/messages";
 const USER_STREAM_MESSAGES: &str = "/v2/users/{openid}/stream_messages";
 const GROUP_MESSAGES: &str = "/v2/groups/{openid}/messages";
@@ -1121,6 +1123,17 @@ impl Client {
         )
         .await
         .map(|_| ())
+    }
+
+    /// 查询当前机器人自身资料。
+    pub async fn me(&self) -> Result<BotProfile, Error> {
+        self.request(Method::GET, BOT_ME, &[], &[], None).await
+    }
+
+    /// 查询单聊用户基本信息。
+    pub async fn user_info(&self, user: &UserOpenId) -> Result<UserInfo, Error> {
+        self.request(Method::GET, USER_INFO, &[user.as_str()], &[], None)
+            .await
     }
 
     pub async fn group_info(&self, group: &GroupOpenId) -> Result<GroupInfo, Error> {

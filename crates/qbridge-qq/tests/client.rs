@@ -687,3 +687,42 @@ async fn queries_group_mute_setting() {
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/v2/groups/GROUP1/restrict_chat_setting");
 }
+
+#[tokio::test]
+async fn queries_bot_profile_and_user_info() {
+    let service = service().await;
+    service.fake.respond(
+        200,
+        json!({
+            "id": "BOT-ID",
+            "username": "MyBot",
+            "avatar": "https://example.com/bot.png",
+            "bot": true
+        }),
+    );
+    let me = service.client().me().await.unwrap();
+    assert_eq!(me.id, "BOT-ID");
+    assert_eq!(me.username, "MyBot");
+    assert_eq!(me.avatar.as_deref(), Some("https://example.com/bot.png"));
+
+    service.fake.respond(
+        200,
+        json!({
+            "nickname": "Alice",
+            "avatar": "https://example.com/alice.png"
+        }),
+    );
+    let user = qbridge_qq::UserOpenId::new("USER1").unwrap();
+    let info = service.client().user_info(&user).await.unwrap();
+    assert_eq!(info.display_name(), Some("Alice"));
+    assert_eq!(
+        info.avatar.as_deref(),
+        Some("https://example.com/alice.png")
+    );
+
+    let requests = service.fake.requests();
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/users/@me");
+    assert_eq!(requests[1].method, "GET");
+    assert_eq!(requests[1].path, "/v2/users/USER1/info");
+}
